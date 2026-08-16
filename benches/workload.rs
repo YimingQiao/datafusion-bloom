@@ -49,10 +49,22 @@ const TPCH_TABLES: &[&str] = &[
     "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
 ];
 
+const STATS_CEB_TABLES: &[&str] = &[
+    "users",
+    "posts",
+    "postlinks",
+    "posthistory",
+    "comments",
+    "votes",
+    "badges",
+    "tags",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Workload {
     Job,
     CebImdb,
+    StatsCeb,
     Tpch,
 }
 
@@ -61,8 +73,9 @@ impl Workload {
         match value {
             "job" => Self::Job,
             "ceb-imdb" | "ceb_imdb" | "ceb" => Self::CebImdb,
+            "stats-ceb" | "stats_ceb" | "stats" => Self::StatsCeb,
             "tpch" => Self::Tpch,
-            _ => panic!("--workload must be job, ceb-imdb, or tpch, got {value}"),
+            _ => panic!("--workload must be job, ceb-imdb, stats-ceb, or tpch, got {value}"),
         }
     }
 
@@ -70,6 +83,7 @@ impl Workload {
         match self {
             Self::Job => "job",
             Self::CebImdb => "ceb-imdb",
+            Self::StatsCeb => "stats-ceb",
             Self::Tpch => "tpch",
         }
     }
@@ -77,6 +91,7 @@ impl Workload {
     fn tables(self) -> &'static [&'static str] {
         match self {
             Self::Job | Self::CebImdb => JOB_TABLES,
+            Self::StatsCeb => STATS_CEB_TABLES,
             Self::Tpch => TPCH_TABLES,
         }
     }
@@ -109,6 +124,7 @@ struct Options {
     preload_memory: bool,
     reoptimize: bool,
     utf8view: bool,
+    large_utf8: bool,
 }
 
 impl Options {
@@ -139,6 +155,7 @@ impl Options {
         let mut preload_memory = false;
         let mut reoptimize = false;
         let mut utf8view = false;
+        let mut large_utf8 = false;
 
         let mut arguments = env::args().skip(1);
         while let Some(flag) = arguments.next() {
@@ -162,6 +179,7 @@ impl Options {
                 "--preload-memory" => preload_memory = true,
                 "--reoptimize" => reoptimize = true,
                 "--utf8view" => utf8view = true,
+                "--large-utf8" => large_utf8 = true,
                 "--workload" => workload = Workload::parse(&next_value(&mut arguments, &flag)),
                 "--data-dir" => data_dir = Some(PathBuf::from(next_value(&mut arguments, &flag))),
                 "--query-dir" => query_dir = Some(PathBuf::from(next_value(&mut arguments, &flag))),
@@ -197,6 +215,10 @@ impl Options {
             }
         }
 
+        if workload == Workload::CebImdb && data_dir.is_none() && !utf8view {
+            large_utf8 = true;
+        }
+
         assert!(scale_factor > 0, "scale factor must be greater than zero");
         assert!(threads > 0, "threads must be greater than zero");
         assert!(
@@ -209,6 +231,10 @@ impl Options {
         );
         assert!(runs > 0, "runs must be greater than zero");
         assert!(
+            !(utf8view && large_utf8),
+            "--utf8view and --large-utf8 are mutually exclusive"
+        );
+        assert!(
             usize::from(handoff_audit) + usize::from(baseline_only) + usize::from(bloom_only) <= 1,
             "--handoff-audit, --baseline-only, and --bloom-only are mutually exclusive"
         );
@@ -219,13 +245,16 @@ impl Options {
         );
 
         let data_dir = data_dir.unwrap_or_else(|| match workload {
-            Workload::Job | Workload::CebImdb => manifest.join("benchmark_data/job/parquet"),
+            Workload::Job => manifest.join("benchmark_data/job/parquet"),
+            Workload::CebImdb => manifest.join("benchmark_data/job/parquet-largeutf8"),
+            Workload::StatsCeb => manifest.join("benchmark_data/stats-ceb/parquet"),
             Workload::Tpch => {
                 manifest.join(format!("benchmark_data/tpch/sf{scale_factor}/parquet"))
             }
         });
         let query_dir = query_dir.unwrap_or_else(|| match workload {
             Workload::CebImdb => manifest.join("benchmark_data/ceb-imdb/queries"),
+            Workload::StatsCeb => manifest.join("benchmark_data/stats-ceb/queries"),
             Workload::Job | Workload::Tpch => manifest
                 .join("benchmark")
                 .join(workload.name())
@@ -258,6 +287,7 @@ impl Options {
             preload_memory,
             reoptimize,
             utf8view,
+            large_utf8,
         }
     }
 }
@@ -940,7 +970,39 @@ async fn make_context(
                 .await?;
         }
     }
+    validate_string_representation(&context, options).await?;
     Ok(context)
+}
+
+async fn validate_string_representation(context: &SessionContext, options: &Options) -> Result<()> {
+    if !options.large_utf8 {
+        return Ok(());
+    }
+
+    let mut saw_large_utf8 = false;
+    for table in options.workload.tables() {
+        let frame = context.table(*table).await?;
+        for field in frame.schema().fields() {
+            match field.data_type() {
+                datafusion::arrow::datatypes::DataType::LargeUtf8 => saw_large_utf8 = true,
+                datafusion::arrow::datatypes::DataType::Utf8
+                | datafusion::arrow::datatypes::DataType::Utf8View => {
+                    return Err(DataFusionError::Execution(format!(
+                        "--large-utf8 requires LargeUtf8 Parquet strings, but {table}.{} is {}",
+                        field.name(),
+                        field.data_type()
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    if !saw_large_utf8 {
+        return Err(DataFusionError::Execution(
+            "--large-utf8 was requested, but the workload has no LargeUtf8 columns".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn execute_pair(
@@ -1286,14 +1348,20 @@ fn source_name(options: &Options) -> &'static str {
 }
 
 fn string_type_name(options: &Options) -> &'static str {
-    if options.utf8view { "Utf8View" } else { "Utf8" }
+    if options.utf8view {
+        "Utf8View"
+    } else if options.large_utf8 {
+        "LargeUtf8"
+    } else {
+        "Utf8"
+    }
 }
 
 fn print_help() {
     println!(
         "Usage: cargo bench --bench workload -- [OPTIONS]\n\
          \n\
-         --workload job|ceb-imdb|tpch Workload (default: job)\n\
+         --workload job|ceb-imdb|stats-ceb|tpch Workload (default: job)\n\
          --data-dir PATH           Parquet root (defaults inside benchmark_data)\n\
          --query-dir PATH          SQL directory (defaults inside benchmark)\n\
          --queries NAMES           Comma-separated stems, e.g. 1a,6a (default: all)\n\
@@ -1301,6 +1369,7 @@ fn print_help() {
          --threads N               DataFusion target partitions (default: 1)\n\
          --batch-size N            Override DataFusion's native Arrow batch size\n\
          --utf8view                Restore DataFusion 54.1's native Utf8View strings\n\
+         --large-utf8              Require 64-bit-offset strings from Parquet\n\
          --excitation-threshold F  Reactivate below this cardinality fraction (default: 1)\n\
          --warmups N               Untimed pairs per query (default: 1)\n\
          --runs N                  Timed pairs per query (default: 5)\n\

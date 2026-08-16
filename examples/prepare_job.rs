@@ -7,6 +7,8 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::config::{ParquetColumnOptions, TableParquetOptions};
 use datafusion::dataframe::DataFrameWriteOptions;
+use datafusion::logical_expr::expr_fn::cast;
+use datafusion::prelude::col;
 use datafusion::prelude::{CsvReadOptions, SessionConfig, SessionContext};
 
 type AnyResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -20,6 +22,7 @@ struct Options {
     row_group_size: usize,
     dictionary_enabled: bool,
     integer_encoding: Option<String>,
+    large_utf8: bool,
 }
 
 #[tokio::main]
@@ -64,7 +67,7 @@ async fn main() -> AnyResult<()> {
         }
 
         println!("convert {:<18} {}", table.name, source.display());
-        let schema = table.schema();
+        let schema = table.schema(false);
         let frame = context
             .read_csv(
                 path_string(&source),
@@ -75,6 +78,20 @@ async fn main() -> AnyResult<()> {
                     .newlines_in_values(true),
             )
             .await?;
+        let frame = if options.large_utf8 {
+            frame.select(
+                table
+                    .columns
+                    .iter()
+                    .map(|(name, kind)| match kind {
+                        Kind::Text => cast(col(*name), DataType::LargeUtf8).alias(*name),
+                        Kind::Int => col(*name),
+                    })
+                    .collect::<Vec<_>>(),
+            )?
+        } else {
+            frame
+        };
 
         let mut parquet_options = TableParquetOptions::default();
         parquet_options.global.compression = Some(options.compression.clone());
@@ -122,10 +139,10 @@ async fn main() -> AnyResult<()> {
 fn parse_options() -> AnyResult<Options> {
     let mut arguments = env::args().skip(1);
     let csv_dir = arguments.next().ok_or(
-            "usage: prepare_job <csv-dir> <parquet-dir> [threads] [compression] [row-group-rows] [dictionary-enabled] [integer-encoding]",
+            "usage: prepare_job <csv-dir> <parquet-dir> [threads] [compression] [row-group-rows] [dictionary-enabled] [integer-encoding] [string-type]",
     )?;
     let parquet_dir = arguments.next().ok_or(
-            "usage: prepare_job <csv-dir> <parquet-dir> [threads] [compression] [row-group-rows] [dictionary-enabled] [integer-encoding]",
+            "usage: prepare_job <csv-dir> <parquet-dir> [threads] [compression] [row-group-rows] [dictionary-enabled] [integer-encoding] [string-type]",
     )?;
     let threads = arguments
         .next()
@@ -146,6 +163,11 @@ fn parse_options() -> AnyResult<Options> {
     let integer_encoding = arguments
         .next()
         .filter(|value| !value.eq_ignore_ascii_case("default"));
+    let large_utf8 = match arguments.next().as_deref().unwrap_or("utf8") {
+        "utf8" => false,
+        "large-utf8" | "large_utf8" => true,
+        value => return Err(format!("string-type must be utf8 or large-utf8, got {value}").into()),
+    };
     if threads == 0 {
         return Err("threads must be greater than zero".into());
     }
@@ -154,7 +176,7 @@ fn parse_options() -> AnyResult<Options> {
     }
     if arguments.next().is_some() {
         return Err(
-            "usage: prepare_job <csv-dir> <parquet-dir> [threads] [compression] [row-group-rows] [dictionary-enabled] [integer-encoding]".into(),
+            "usage: prepare_job <csv-dir> <parquet-dir> [threads] [compression] [row-group-rows] [dictionary-enabled] [integer-encoding] [string-type]".into(),
         );
     }
     Ok(Options {
@@ -165,6 +187,7 @@ fn parse_options() -> AnyResult<Options> {
         row_group_size,
         dictionary_enabled,
         integer_encoding,
+        large_utf8,
     })
 }
 
@@ -185,13 +208,14 @@ struct JobTable {
 }
 
 impl JobTable {
-    fn schema(&self) -> Arc<Schema> {
+    fn schema(&self, large_utf8: bool) -> Arc<Schema> {
         Arc::new(Schema::new(
             self.columns
                 .iter()
                 .map(|(name, kind)| {
                     let data_type = match kind {
                         Kind::Int => DataType::Int32,
+                        Kind::Text if large_utf8 => DataType::LargeUtf8,
                         Kind::Text => DataType::Utf8,
                     };
                     Field::new(*name, data_type, true)

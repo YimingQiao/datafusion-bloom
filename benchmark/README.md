@@ -3,10 +3,13 @@
 This directory owns the reproducible end-to-end benchmark for this project.
 It never reads data, queries, binaries, or caches from another local project.
 
-The release benchmark uses two standard workloads:
+The release benchmark uses four standard workload families:
 
 - JOB: the 113 canonical Join Order Benchmark queries and the May 2013 IMDB
-  research snapshot.
+  research snapshot, stored as both compressed and uncompressed Parquet.
+- CEB IMDB: 3,133 cardinality-estimation benchmark queries over the same IMDB
+  snapshot.
+- STATS-CEB: 146 multi-join queries over simplified Stack Overflow data.
 - TPC-H: the 22 standard decision-support queries over independently generated
   scale-factor data.
 
@@ -28,12 +31,14 @@ The runner does not override DataFusion's Arrow batch size by default
 analysis. Baseline and Bloom use the same Parquet tables and retain
 DataFusion's native join dynamic-filter pushdown.
 
-The runner temporarily maps strings to ordinary Arrow `Utf8` for both engines
-because DataFusion 54.1's native `Utf8View` `take` path can retain an amplified
-backing-buffer graph across high-fanout joins. The result header always prints
-the effective representation. `--utf8view` restores the native default for a
-sensitivity run. This common setting does not change Bloom scheduling or
-handoff policy.
+The runner temporarily maps strings to owned Arrow offset arrays for both
+engines because DataFusion 54.1's native `Utf8View` `take` path can retain an
+amplified backing-buffer graph across high-fanout joins. Ordinary `Utf8` is the
+default. Full CEB IMDB uses `LargeUtf8`, described below, because some stock
+DataFusion intermediates exceed the 32-bit offset limit. The result header
+always prints the effective representation. `--utf8view` restores the native
+default for a sensitivity run. These common settings do not change Bloom
+scheduling or handoff policy.
 
 `--preload-memory` is a materialization diagnostic, not a speedup
 configuration: `MemTable` does not expose the same dynamic-filter path as
@@ -45,6 +50,61 @@ then reused, as it would be by a persistent service. Use
 `--fresh-context-per-query --warmups 0 --runs 1` only to diagnose cold
 single-query latency without cross-query prepared-sample reuse; context and
 table registration remain outside the query timer.
+
+## Reproducing the complete suite
+
+Prepare each independently owned data cache from the repository root:
+
+```bash
+benchmark/scripts/prepare-job.sh
+BLOOM_JOB_PARQUET_DIR="$PWD/benchmark_data/job/parquet-uncompressed" \
+BLOOM_JOB_COMPRESSION=uncompressed \
+  benchmark/scripts/prepare-job.sh
+BLOOM_JOB_PARQUET_DIR="$PWD/benchmark_data/job/parquet-largeutf8" \
+BLOOM_JOB_STRING_TYPE=large-utf8 \
+  benchmark/scripts/prepare-job.sh
+benchmark/scripts/prepare-ceb-imdb.sh
+benchmark/scripts/prepare-stats-ceb.sh
+benchmark/scripts/prepare-tpch.sh 10
+```
+
+Then run every workload, or name a subset. The script prewarms the selected
+Parquet files outside query timing, records the environment, uses one complete
+measured pass by default, and writes raw logs only to the ignored
+`benchmark_results/` directory:
+
+```bash
+benchmark/scripts/run-benchmarks.sh
+benchmark/scripts/run-benchmarks.sh ceb-imdb stats-ceb
+```
+
+For per-query medians instead of the practical full-suite pass:
+
+```bash
+BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3 \
+  benchmark/scripts/run-benchmarks.sh job-compressed tpch
+```
+
+No run-script path changes DataFusion's batch size. Set
+`BLOOM_BENCH_THREADS` to change both the Tokio worker count and DataFusion
+target partitions; the release table uses one.
+
+## CEB IMDB provenance
+
+`benchmark/scripts/prepare-ceb-imdb.sh` downloads and checksum-verifies the
+3,133-query corpus at commit `1f39e9aa85ee64249f60bfa59543e8707b228644`
+of <https://github.com/RyanMarcus/imdb_pg_dataset>. It uses the independently
+prepared compressed JOB Parquet data and recursively preserves the original
+query groups.
+
+The full-suite CEB run reads the same values from the separate
+`parquet-largeutf8` directory. A small number of high-fanout stock DataFusion
+plans materialize more than 2 GB of selected string payload and overflow
+Arrow's 32-bit `Utf8` offsets; native `Utf8View` avoids that limit but exhibits
+the buffer-retention cliff described above. `LargeUtf8` keeps owned,
+copy-on-selection strings while changing only the offset width. The
+`--large-utf8` runner flag verifies that every string column actually uses this
+representation; Baseline and Bloom always share the same files.
 
 ## JOB provenance
 
@@ -111,6 +171,22 @@ and kept in this repository. For example:
 benchmark/scripts/prepare-tpch.sh 10
 cargo bench --bench workload -- \
   --workload tpch --scale-factor 10 --threads 1 --warmups 1 --runs 3 \
+  --parquet-pushdown
+```
+
+## STATS-CEB provenance
+
+`benchmark/scripts/prepare-stats-ceb.sh` pins commit
+`670cb8d4bf4cbfa32f94fdf17f33973d3fd67d1b` of
+<https://github.com/Nathaniel-Han/End-to-End-CardEst-Benchmark>, verifies its
+archive checksum, extracts exactly the eight simplified Stack Overflow CSV
+tables and 146 workload queries, and converts the tables to Zstandard Parquet
+with the repository's Rust preparation program:
+
+```bash
+benchmark/scripts/prepare-stats-ceb.sh
+cargo bench --bench workload -- \
+  --workload stats-ceb --threads 1 --warmups 1 --runs 3 \
   --parquet-pushdown
 ```
 

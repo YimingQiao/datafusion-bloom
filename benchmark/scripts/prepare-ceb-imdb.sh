@@ -6,6 +6,7 @@ project_dir=$(cd -- "$script_dir/../.." && pwd)
 data_dir="$project_dir/benchmark_data/ceb-imdb"
 archive="$data_dir/downloads/imdb_pg_dataset.tar.gz"
 queries_dir="$data_dir/queries"
+parquet_dir=${BLOOM_CEB_IMDB_PARQUET_DIR:-"$project_dir/benchmark_data/job/parquet-largeutf8"}
 source_url="https://codeload.github.com/RyanMarcus/imdb_pg_dataset/tar.gz/1f39e9aa85ee64249f60bfa59543e8707b228644"
 expected_sha256="43f4b5984db5b281968a3f548a93cb00cbd8bad7850ce366641592117958754c"
 expected_queries=3133
@@ -51,9 +52,10 @@ if [[ "$query_count" -ne "$expected_queries" ]]; then
     exit 1
 fi
 
-if [[ ! -d "$project_dir/benchmark_data/job/parquet" ]]; then
-    echo "CEB-IMDB uses the JOB IMDB data; run benchmark/scripts/prepare-job.sh first." >&2
+if [[ ! -d "$parquet_dir" ]]; then
+    echo "CEB-IMDB data does not exist: $parquet_dir" >&2
+    echo "Prepare the LargeUtf8 JOB Parquet directory documented in benchmark/README.md first." >&2
     exit 1
 fi
 
-echo "CEB-IMDB queries are ready under $queries_dir"
+echo "CEB-IMDB queries are ready under $queries_dir (data: $parquet_dir)"

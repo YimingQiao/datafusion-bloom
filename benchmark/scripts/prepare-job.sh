@@ -15,6 +15,7 @@ compression=${BLOOM_JOB_COMPRESSION:-"zstd(3)"}
 row_group_rows=${BLOOM_JOB_ROW_GROUP_ROWS:-262144}
 dictionary_enabled=${BLOOM_JOB_DICTIONARY_ENABLED:-true}
 integer_encoding=${BLOOM_JOB_INTEGER_ENCODING:-default}
+string_type=${BLOOM_JOB_STRING_TYPE:-utf8}
 
 mkdir -p "$data_dir/downloads" "$csv_dir" "$parquet_dir"
 
@@ -54,6 +55,6 @@ fi
 cd "$project_dir"
 cargo run --release --example prepare_job -- \
     "$csv_dir" "$parquet_dir" "$threads" "$compression" "$row_group_rows" \
-    "$dictionary_enabled" "$integer_encoding"
+    "$dictionary_enabled" "$integer_encoding" "$string_type"
 
-echo "JOB data is ready under $parquet_dir (compression: $compression, row-group rows: $row_group_rows, dictionary: $dictionary_enabled, integer encoding: $integer_encoding)"
+echo "JOB data is ready under $parquet_dir (compression: $compression, row-group rows: $row_group_rows, dictionary: $dictionary_enabled, integer encoding: $integer_encoding, strings: $string_type)"
