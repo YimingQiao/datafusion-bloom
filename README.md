@@ -4,40 +4,70 @@
 [![DataFusion: 54.1.0](https://img.shields.io/badge/DataFusion-54.1.0-orange)](Cargo.toml)
 [![CI](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml/badge.svg)](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml)
 
-Bloom speeds up complex join queries in Apache DataFusion by moving selective
-membership across the join graph before the joins execute. It divides query
-execution into two stages:
+Bloom gives Apache DataFusion a whole-query pre-join reduction stage. A
+selective dimension can shrink fact tables several joins away before the first
+formal join runs, while existing SQL and DataFusion's join engine stay
+unchanged.
 
-1. **transfer** executes independent table operators, propagates join-key
-   membership, and produces reduced handoffs;
-2. **join** runs the original query with DataFusion's stock physical operators.
+```text
+SQL -> DataFusion optimized plan
+             |
+             v
+  transfer: estimate -> propagate -> materialize
+             |
+             v
+  join: the same DataFusion HashJoinExec tree
+```
 
-Bloom does not replace `HashJoinExec` or implement a second join engine. The
-formal plan remains exact; transfer only removes rows that cannot contribute to
-the result.
+Bloom divides execution into two strict stages. **Transfer** propagates safe
+join-key membership across the graph and produces compact table handoffs.
+**Join** substitutes those handoffs into DataFusion's already optimized plan
+and runs its stock joins, aggregates, exchanges, and output operators.
 
-## How it works
+## What Bloom adds
 
-- **Estimate.** Reusable prepared samples estimate locally filtered table
-  cardinalities and promising propagation edges.
-- **Transfer and adapt.** Bloom chooses a source, moves membership to its
-  neighbors, observes the resulting cardinalities, and chooses again.
-- **Materialize once.** A participating source normally scans once and retains
-  all query-used columns in a compact Arrow handoff. Later transfer predicates
-  filter that handoff in memory instead of rescanning the source.
-- **Filter early.** Transfer membership is evaluated before expensive local
-  string predicates when the source supports it. Exact integer membership may
-  also provide independent row-group or page-pruning bounds.
-- **Join normally.** The reduced handoffs are substituted into DataFusion's
-  already optimized physical plan. Its join tree, build/probe choices, and
-  stock execution operators are preserved.
+- **Whole-graph transfer.** Membership can move in either direction and across
+  multiple joins instead of stopping at one build-to-probe edge.
+- **Adaptive execution.** Reusable samples suggest the first transfers; actual
+  materialized cardinalities guide the next ones.
+- **Reusable reduced inputs.** A participating table is normally scanned and
+  materialized once. Later transfer predicates compact its Arrow handoff in
+  memory rather than rescanning the source.
+- **Early filtering.** Transfer membership runs before expensive local string
+  predicates when the source supports it and can provide sound Parquet pruning
+  bounds for exact integer domains.
+- **Native formal execution.** Bloom does not add a join operator or rerun join
+  ordering by default. Exact joins still determine the final result.
 
-On DataFusion, a partitioned collection of immutable Arrow `RecordBatch`es is
-the equivalent of Bloom's materialized table collection. The collection
-publishes exact statistics for diagnostics, is charged to DataFusion's memory
-pool, and keeps the partitioning chosen for the original table plan. Bloom
-does not rerun join ordering by default: row counts alone do not describe
-duplicate-heavy join-key distributions.
+## Algorithm lineage
+
+Yannakakis' classic algorithm evaluates an acyclic join in two conceptual
+steps: semijoin reduction removes tuples that cannot reach the answer, then the
+reduced relations are joined. Predicate Transfer brought that pre-filtering
+idea to general multi-join graphs with lightweight membership structures.
+Robust Predicate Transfer (RPT) later studied how this family can remain robust
+when the chosen join order is poor.
+
+Bloom belongs to this research lineage, but it is its own design rather than a
+rename or wrapper around RPT. Its defining boundary is an adaptive, executable
+transfer stage followed by an unchanged engine-native join stage. This crate
+implements that boundary with DataFusion physical plans, Parquet predicates,
+and compact Arrow materializations.
+
+## Results
+
+DataFusion 54.1.0, one thread, one warmup plus three measured runs, planning
+included, and complete result fingerprints checked against stock DataFusion:
+
+| Workload | DataFusion | Bloom | Total speedup | Correct |
+|---|---:|---:|---:|---:|
+| JOB, 113 queries | 96.940 s | 65.291 s | **1.485×** | 113/113 |
+| TPC-H SF10, 22 queries | 79.147 s | 68.728 s | **1.152×** | 22/22 |
+
+Both sides use the same Parquet files, filter-pushdown settings, native batch
+size, and ordinary Arrow `Utf8` mapping. The latter temporarily avoids a
+DataFusion 54.1 `Utf8View` join-performance cliff; `--utf8view` restores the
+native mapping for comparison.
 
 ## Compatibility
 
@@ -81,23 +111,10 @@ let config = BloomConfig::default().with_all_bounded_sources();
 let state = install_bloom(state, config)?;
 ```
 
-## Benchmarks
+## Running the benchmarks
 
-DataFusion 54.1.0, one thread, one warmup plus three measured runs, planning
-included, and complete result fingerprints checked against stock DataFusion:
-
-| Workload | DataFusion | Bloom | Total speedup | Correct |
-|---|---:|---:|---:|---:|
-| JOB, 113 queries | 96.940 s | 65.291 s | **1.485×** | 113/113 |
-| TPC-H SF10, 22 queries | 79.147 s | 68.728 s | **1.152×** | 22/22 |
-
-Both sides use the same Parquet files, filter-pushdown settings, native batch
-size, and ordinary Arrow `Utf8` mapping. The latter temporarily avoids a
-DataFusion 54.1 `Utf8View` join-performance cliff; `--utf8view` restores the
-native mapping for comparison.
-
-The repository includes self-contained runners for both workloads. Prepare and
-run them from the repository root:
+The repository includes self-contained JOB and TPC-H runners. Prepare and run
+them from the repository root:
 
 ```bash
 benchmark/scripts/prepare-job.sh
@@ -152,6 +169,24 @@ keys, multi-table propagation, Parquet reader placement, full-row and
 row-location handoffs, projection remapping, aggregate partitioning, and
 complete JOB/TPC-H output fingerprints. Approximate membership may retain extra
 rows but cannot remove a row that could satisfy the original exact join.
+
+## References
+
+- Mihalis Yannakakis,
+  [*Algorithms for Acyclic Database Schemes*](https://www.sigmod.org/publications/dblp/db/conf/vldb/Yannakakis81.html),
+  VLDB 1981.
+- Yifei Yang, Hangdong Zhao, Xiangyao Yu, and Paraschos Koutris,
+  [*Predicate Transfer: Efficient Pre-Filtering on Multi-Join Queries*](https://arxiv.org/abs/2307.15255),
+  CIDR 2024.
+- Junyi Zhao, Kai Su, Yifei Yang, Xiangyao Yu, Paraschos Koutris, and Huanchen
+  Zhang,
+  [*Debunking the Myth of Join Ordering: Toward Robust SQL Analytics*](https://arxiv.org/abs/2502.15181),
+  SIGMOD 2025.
+- Yiming Qiao, Peter Boncz, and Huanchen Zhang,
+  [*Robust Predicate Transfer with Dynamic Execution*](https://duckdb.org/library/robust-predicate-transfer-vldb/),
+  PVLDB 2026.
+- Related implementations: [Bloom for DuckDB](https://github.com/YimingQiao/bloom)
+  and [BloomPG](https://github.com/YimingQiao/bloompg).
 
 ## License
 
