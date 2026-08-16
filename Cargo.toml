@@ -1,0 +1,35 @@
+[package]
+name = "datafusion-bloom"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Bloom transfer extension for Apache DataFusion"
+license = "Apache-2.0"
+keywords = ["arrow", "datafusion", "join", "query-optimizer"]
+categories = ["database"]
+
+[dependencies]
+async-trait = "0.1"
+datafusion = { version = "=54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
+datafusion-datasource = "=54.1.0"
+futures = "0.3"
+
+[dev-dependencies]
+datafusion = { version = "=54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[bench]]
+name = "synthetic"
+harness = false
+
+[[bench]]
+name = "workload"
+harness = false
+
+[[bench]]
+name = "handoff"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
