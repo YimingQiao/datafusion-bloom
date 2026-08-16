@@ -83,9 +83,21 @@ let state = install_bloom(state, config)?;
 
 ## Benchmarks
 
-The repository includes self-contained runners for the complete 113-query Join
-Order Benchmark and all 22 TPC-H queries. Prepare and run them from the
-repository root:
+DataFusion 54.1.0, one thread, one warmup plus three measured runs, planning
+included, and complete result fingerprints checked against stock DataFusion:
+
+| Workload | DataFusion | Bloom | Total speedup | Correct |
+|---|---:|---:|---:|---:|
+| JOB, 113 queries | 96.940 s | 65.291 s | **1.485×** | 113/113 |
+| TPC-H SF10, 22 queries | 79.147 s | 68.728 s | **1.152×** | 22/22 |
+
+Both sides use the same Parquet files, filter-pushdown settings, native batch
+size, and ordinary Arrow `Utf8` mapping. The latter temporarily avoids a
+DataFusion 54.1 `Utf8View` join-performance cliff; `--utf8view` restores the
+native mapping for comparison.
+
+The repository includes self-contained runners for both workloads. Prepare and
+run them from the repository root:
 
 ```bash
 benchmark/scripts/prepare-job.sh
