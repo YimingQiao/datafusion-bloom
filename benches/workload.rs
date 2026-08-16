@@ -1131,7 +1131,7 @@ fn load_queries(options: &Options) -> Result<Vec<Query>> {
         {
             continue;
         }
-        let sql = fs::read_to_string(&path)?;
+        let sql = normalize_query_sql(options.workload, fs::read_to_string(&path)?)?;
         if !found.insert(name.clone()) {
             return Err(DataFusionError::Execution(format!(
                 "duplicate normalized query name: {name}"
@@ -1156,6 +1156,25 @@ fn load_queries(options: &Options) -> Result<Vec<Query>> {
         ));
     }
     Ok(queries)
+}
+
+fn normalize_query_sql(workload: Workload, sql: String) -> Result<String> {
+    if workload != Workload::CebImdb || !sql.contains("::float") {
+        return Ok(sql);
+    }
+
+    // CEB guards these casts with a numeric regular expression. DataFusion may
+    // reorder conjuncts and evaluate the fallible cast before its guard, while
+    // TRY_CAST retains the intended false-for-nonnumeric-row semantics.
+    let normalized = sql
+        .replace("mii1.info::float", "TRY_CAST(mii1.info AS FLOAT)")
+        .replace("mii2.info::float", "TRY_CAST(mii2.info AS FLOAT)");
+    if normalized.contains("::float") {
+        return Err(DataFusionError::Execution(
+            "CEB query contains an unrecognized guarded ::float cast".to_string(),
+        ));
+    }
+    Ok(normalized)
 }
 
 fn collect_sql_paths(directory: &Path, output: &mut Vec<PathBuf>) -> Result<()> {

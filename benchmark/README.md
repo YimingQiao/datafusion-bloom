@@ -106,6 +106,14 @@ copy-on-selection strings while changing only the offset width. The
 `--large-utf8` runner flag verifies that every string column actually uses this
 representation; Baseline and Bloom always share the same files.
 
+The source corpus also contains 435 queries whose numeric text predicates use
+`regex AND value::float`. DataFusion can reorder those conjuncts and evaluate
+the fallible cast on a nonnumeric row before the regular expression. The runner
+leaves the pinned SQL files untouched and normalizes only the two guarded CEB
+casts to `TRY_CAST(value AS FLOAT)` at load time. This preserves the workload's
+intended false-for-nonnumeric-row behavior for both Baseline and Bloom and is
+reported here rather than silently dropping the affected queries.
+
 ## JOB provenance
 
 The standard IMDB snapshot is downloaded directly from the CWI JOB research
