@@ -25,11 +25,8 @@ handoff cannot acquire hidden scan parallelism.
 
 The runner does not override DataFusion's Arrow batch size by default
 (DataFusion 54.1.0 uses 8,192). `--batch-size` exists only for sensitivity
-analysis and is never used for a release headline. Published speedups use the
-same Parquet tables for Baseline and Bloom, preserving DataFusion's native join
-dynamic-filter pushdown. Bloom builds a separate independently executable P0
-for transfer; formal execution starts from the native DataFusion physical plan
-and only replaces leaves with actual handoffs.
+analysis. Baseline and Bloom use the same Parquet tables and retain
+DataFusion's native join dynamic-filter pushdown.
 
 The runner temporarily maps strings to ordinary Arrow `Utf8` for both engines
 because DataFusion 54.1's native `Utf8View` `take` path can retain an amplified
@@ -124,8 +121,7 @@ handoff modes, scan metrics, and transfer/finalization time. The result table
 reports separate `full_rows`, `row_locations`, and `direct` counts.
 `--post-scan-membership` moves Bloom membership above the Parquet reader for an
 A/B diagnosis; reader placement is the default. `--parquet-pushdown` enables
-DataFusion's general Parquet filter pushdown for both Baseline and Bloom, and is
-therefore the stronger baseline comparison used by the stable JOB result.
+DataFusion's general Parquet filter pushdown for both Baseline and Bloom.
 `--handoff-audit` executes Bloom only, fully materializes and fingerprints each
 output, and reports those counts without paying for a baseline run; it is the
 fast way to audit a policy over every workload query.
@@ -146,13 +142,6 @@ Every timed run materializes the complete Arrow output and verifies an
 order-independent fingerprint containing row count, two independent sums, and
 an XOR component. A mismatch aborts the workload immediately.
 
-`cargo bench --bench handoff` runs the independent positive-control comparison
-between FullRows and RowLocations on a generated high-entropy wide Parquet
-table. Data generation and warmup occur outside its five measured complete
-query runs.
-
-The latest checked result is recorded in
-[RESULTS-2026-08-17.md](RESULTS-2026-08-17.md). The materialization and runner
-audits from 2026-08-16 are retained as historical design evidence, but their
-performance tables predate the final single-thread, common-`Utf8`, native
-formal-plan protocol and are superseded.
+`cargo bench --bench handoff` compares FullRows and RowLocations on a generated
+high-entropy wide Parquet table. Data generation and warmup occur outside its
+measured complete-query runs.
