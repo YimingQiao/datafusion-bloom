@@ -852,7 +852,7 @@ impl BloomTransferEngine {
         // replacements to the separately planned native formal tree so all
         // untouched scans keep their join-owned runtime filters.
         let mut rewritten = formal_plan;
-        replacements.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+        replacements.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
         for (path, replacement) in replacements {
             rewritten = replace_at_path(rewritten, &path, replacement)?;
         }
