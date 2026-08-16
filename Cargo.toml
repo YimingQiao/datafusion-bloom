@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Bloom transfer extension for Apache DataFusion"
-license = "Apache-2.0"
+license = "MIT"
 keywords = ["arrow", "datafusion", "join", "query-optimizer"]
 categories = ["database"]
 

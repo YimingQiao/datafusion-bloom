@@ -3,6 +3,7 @@
 [![Version: 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)](Cargo.toml)
 [![DataFusion: 54.1.0](https://img.shields.io/badge/DataFusion-54.1.0-orange)](Cargo.toml)
 [![CI](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml/badge.svg)](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Bloom gives Apache DataFusion a whole-query pre-join reduction stage. A
 selective dimension can shrink fact tables several joins away before the first
@@ -190,4 +191,4 @@ rows but cannot remove a row that could satisfy the original exact join.
 
 ## License
 
-Apache-2.0.
+MIT.
