@@ -57,18 +57,30 @@ and compact Arrow materializations.
 
 ## Results
 
-DataFusion 54.1.0, one thread, one warmup plus three measured runs, planning
-included, and complete result fingerprints checked against stock DataFusion:
+DataFusion 54.1.0 on two Intel Xeon Platinum 8474C CPUs. Each query uses one
+thread, the Parquet pages are prewarmed outside query timing, and the table
+reports one complete measured pass over every query. SQL planning, transfer,
+materialization, joins, aggregation, and full output consumption are included.
 
-| Workload | DataFusion | Bloom | Total speedup | Correct |
-|---|---:|---:|---:|---:|
-| JOB, 113 queries | 96.940 s | 65.291 s | **1.485×** | 113/113 |
-| TPC-H SF10, 22 queries | 79.147 s | 68.728 s | **1.152×** | 22/22 |
+| Workload | Parquet | Queries | DataFusion | Bloom | Total | Geo. mean | Faster |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| CEB IMDB | 1.43 GB, compressed | 3,133 | 3,948.177 s | 2,119.400 s | **1.863×** | 1.390× | 2,799/3,133 |
+| JOB | 1.43 GB, compressed | 113 | 102.378 s | 69.398 s | **1.475×** | 1.409× | 91/113 |
+| JOB | 2.58 GB, uncompressed | 113 | 78.025 s | 45.613 s | **1.711×** | 1.638× | 99/113 |
+| STATS-CEB | 12.9 MB, compressed | 146 | 186.347 s | 174.083 s | **1.070×** | 1.058× | 57/146 |
+| TPC-H SF10 | 2.47 GB, compressed | 22 | 83.506 s | 74.437 s | **1.122×** | 1.077× | 13/22 |
 
-Both sides use the same Parquet files, filter-pushdown settings, native batch
-size, and ordinary Arrow `Utf8` mapping. The latter temporarily avoids a
-DataFusion 54.1 `Utf8View` join-performance cliff; `--utf8view` restores the
-native mapping for comparison.
+All 3,527 Baseline/Bloom result pairs produced identical complete-output
+fingerprints. Both sides use the same files, filter pushdown, native 8,192-row
+batch size, and join dynamic filters. A prepared sample is built once per
+immutable source and reused across its long-lived Bloom session.
+
+The benchmark temporarily uses owned Arrow strings for both sides to avoid a
+DataFusion 54.1 `Utf8View` join-performance cliff. CEB uses `LargeUtf8` because
+some stock DataFusion intermediates exceed the 32-bit `Utf8` offset limit; the
+other string workloads use `Utf8`. These are benchmark data representations,
+not Bloom scheduling options. See the reproducibility notes below for the exact
+commands and the guarded-cast normalization required by CEB.
 
 ## Compatibility
 
@@ -114,25 +126,22 @@ let state = install_bloom(state, config)?;
 
 ## Running the benchmarks
 
-The repository includes self-contained JOB and TPC-H runners. Prepare and run
-them from the repository root:
+The repository includes independently pinned preparation scripts for CEB IMDB,
+JOB, STATS-CEB, and TPC-H, plus one runner for the full table. After preparing
+the data as documented in [benchmark/README.md](benchmark/README.md), run all
+workloads or a named subset from the repository root:
 
 ```bash
-benchmark/scripts/prepare-job.sh
-cargo bench --bench workload -- \
-  --workload job --threads 1 --warmups 1 --runs 3 --parquet-pushdown
-
-benchmark/scripts/prepare-tpch.sh 10
-cargo bench --bench workload -- \
-  --workload tpch --scale-factor 10 --threads 1 --warmups 1 --runs 3 \
-  --parquet-pushdown
+benchmark/scripts/run-benchmarks.sh
+benchmark/scripts/run-benchmarks.sh ceb-imdb job-uncompressed stats-ceb
 ```
 
 The runner includes planning, transfer, materialization, joins, and complete
 output consumption in elapsed time, alternates Baseline and Bloom execution
-order, and checks an order-independent fingerprint for every result. See
-[benchmark/README.md](benchmark/README.md) for data provenance and command-line
-options.
+order, and checks an order-independent fingerprint for every result. Raw logs
+and environment metadata go to the ignored `benchmark_results/` directory.
+Set `BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3` for per-query medians; the table
+above uses the script's practical full-suite default of one prewarmed pass.
 
 ## Configuration
 
