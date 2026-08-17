@@ -48,6 +48,8 @@ impl TransferBloomFilter {
         }
     }
 
+    /// Allocate a probabilistic membership structure under DataFusion's query
+    /// memory limit, so transfer can fail safely before untracked allocation.
     pub(crate) fn try_with_capacity(
         expected_items: usize,
         false_positive_rate: f64,
@@ -84,6 +86,9 @@ impl TransferBloomFilter {
         })
     }
 
+    /// Prefer exact membership when the key domain itself is compact. A wide
+    /// or overflowing domain declines this representation rather than turning
+    /// an optimization into an unbounded allocation.
     pub(crate) fn try_dense_integer(
         minimum: i128,
         maximum: i128,
@@ -243,6 +248,8 @@ impl TransferBloomFilter {
     }
 }
 
+/// Derive a power-of-two bit domain so double hashing can cover it cheaply and
+/// consistently across build and probe.
 fn bloom_shape(expected_items: usize, false_positive_rate: f64) -> (usize, u32) {
     let item_count = expected_items.max(1);
     let ln_2 = std::f64::consts::LN_2;

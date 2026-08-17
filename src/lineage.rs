@@ -44,6 +44,8 @@ pub(crate) struct LineageTracker {
 }
 
 impl LineageTracker {
+    /// Seed every join key with its own identity before any transfer occurs.
+    /// This makes later propagation and subsumption column-granular.
     pub(crate) fn try_new(graph: &BloomGraph) -> Result<Self> {
         let mut tracker = Self {
             per_table: (0..graph.tables.len())
@@ -60,6 +62,9 @@ impl LineageTracker {
         Ok(tracker)
     }
 
+    /// Report whether traversing an edge can add source-key lineage that the
+    /// corresponding destination keys have not already received. This is the
+    /// cycle guard for the propagation fixed point.
     pub(crate) fn edge_carries_new_info(
         &self,
         source: TableId,
@@ -91,6 +96,9 @@ impl LineageTracker {
         Ok(false)
     }
 
+    /// Attach the source rowset's restrictions to every join key of the
+    /// destination. An incoming membership test filters whole rows, so its
+    /// information is not confined to the key on which it was evaluated.
     pub(crate) fn propagate(
         &mut self,
         source: TableId,
@@ -127,6 +135,9 @@ impl LineageTracker {
         Ok(())
     }
 
+    /// Freeze the exact provenance of a filter build. Snapshots let the cache
+    /// reuse equivalent filters and let installation discard filters subsumed
+    /// by a stronger propagation state.
     pub(crate) fn snapshot(
         &self,
         source: TableId,

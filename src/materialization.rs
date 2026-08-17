@@ -14,6 +14,8 @@ use crate::handoff::{estimated_projection_width, estimated_schema_width, estimat
 
 const MIN_COMPACTION_SAVINGS_BYTES: usize = 64 * 1024;
 
+/// Estimate handoff widths from live sample values rather than retained Arrow
+/// capacity. The result informs storage policy only, never transfer scheduling.
 pub(super) fn observed_handoff_widths(
     sample: Option<&[Vec<RecordBatch>]>,
     schema: &Schema,
@@ -150,6 +152,8 @@ pub(super) fn compact_materialized_partitions(
         .collect()
 }
 
+/// Repack one partition into stable batch-sized ownership units. Compaction is
+/// a materialization invariant, not merely a small-batch optimization.
 pub(super) fn compact_materialized_partition(
     partition: Vec<RecordBatch>,
     target_batch_rows: usize,
@@ -178,6 +182,9 @@ pub(super) fn compact_materialized_partition(
     Ok(output)
 }
 
+/// Reset physical ownership after selection: view arrays are garbage-collected
+/// unconditionally, while other sparse arrays are copied only when retaining
+/// their original allocation would be materially wasteful.
 fn compact_batch_group(batches: Vec<RecordBatch>) -> Result<RecordBatch> {
     let batch = if let [batch] = batches.as_slice() {
         batch.clone()
@@ -249,6 +256,8 @@ fn compact_batch_group(batches: Vec<RecordBatch>) -> Result<RecordBatch> {
     }
 }
 
+/// Compute the memory-pool charge for the owned representation, as opposed to
+/// the logical live-byte estimate used by the handoff cost model.
 pub(super) fn partition_physical_bytes(partitions: &[Vec<RecordBatch>]) -> usize {
     partitions
         .iter()

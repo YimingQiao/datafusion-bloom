@@ -39,6 +39,11 @@ pub(crate) struct BloomGraph {
 }
 
 impl BloomGraph {
+    /// Extract Bloom's transfer topology from the optimized physical plan.
+    ///
+    /// Bloom treats each maximal join-free subtree as one table operator and
+    /// connects those operators through traceable inner equi-joins. If no such
+    /// connection exists, there is no useful transfer phase to schedule.
     pub(crate) fn build(
         plan: &Arc<dyn ExecutionPlan>,
         config: &BloomConfig,
@@ -84,20 +89,34 @@ impl<'a> GraphBuilder<'a> {
         }
     }
 
-    /// Analyze `plan` and return the base-table origin of each output column.
+    /// Discover table operators and join relationships while carrying column
+    /// lineage toward parent joins.
+    ///
+    /// A table operator is a unit of transfer, not necessarily a base scan: it
+    /// may include local filtering, projection, or aggregation as long as it
+    /// contains no join. Lineage crosses only operators that preserve column
+    /// identity. Operators such as aggregation remain in the formal plan and
+    /// form a conservative boundary when they sit above a join; joins below
+    /// the boundary are still discovered, but transfer is not inferred across
+    /// it.
     fn analyze(
         &mut self,
         plan: &Arc<dyn ExecutionPlan>,
         path: &mut Vec<usize>,
     ) -> Result<Vec<Option<Origin>>> {
+        // A maximal join-free subtree is one independently materializable
+        // table operator in Bloom's transfer phase.
         if !contains_any_join(plan) {
             return Ok(self.register_table(plan, path));
         }
 
+        // A supported join connects table operators through their key lineage.
         if let Some(join) = plan.downcast_ref::<HashJoinExec>() {
             return self.analyze_hash_join(join, path);
         }
 
+        // Renaming or selecting a column preserves its identity; computing a
+        // new value does not.
         if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
             path.push(0);
             let input_lineage = self.analyze(projection.input(), path)?;
@@ -116,6 +135,8 @@ impl<'a> GraphBuilder<'a> {
         }
 
         let children = plan.children();
+        // Physical wrappers that leave column identity unchanged are
+        // transparent to transfer analysis.
         if children.len() == 1 && is_identity_wrapper(plan.name()) {
             path.push(0);
             let lineage = self.analyze(children[0], path)?;
@@ -124,6 +145,8 @@ impl<'a> GraphBuilder<'a> {
                 return Ok(lineage);
             }
         } else {
+            // A semantic boundary blocks outward lineage, not discovery of
+            // transfer opportunities inside the boundary.
             for (index, child) in children.into_iter().enumerate() {
                 path.push(index);
                 self.analyze(child, path)?;
@@ -131,9 +154,16 @@ impl<'a> GraphBuilder<'a> {
             }
         }
 
+        // Unknown lineage is safer than propagating through an operator whose
+        // output no longer denotes the same input values.
         Ok(vec![None; plan.schema().fields().len()])
     }
 
+    /// Connect the table operators participating in an inner hash join.
+    ///
+    /// All equality keys between the same pair remain one composite edge; they
+    /// must travel together to preserve tuple membership. Outer joins and keys
+    /// without trustworthy lineage remain native and contribute no edge.
     fn analyze_hash_join(
         &mut self,
         join: &HashJoinExec,
@@ -215,6 +245,11 @@ impl<'a> GraphBuilder<'a> {
         Ok(output_lineage)
     }
 
+    /// Admit one join-free subtree as a table operator.
+    ///
+    /// Transfer requires a finite input and, under the conservative default,
+    /// a repeatable source. The operator retains its identity in the formal
+    /// plan so its execution can later be replaced by the selected handoff.
     fn register_table(
         &mut self,
         plan: &Arc<dyn ExecutionPlan>,
@@ -246,20 +281,29 @@ impl<'a> GraphBuilder<'a> {
     }
 }
 
+/// Accept a join key only when it still denotes one table-operator column.
+/// Computed keys require expression lineage that Bloom does not currently
+/// claim to understand.
 fn resolve_column(expr: &Arc<dyn PhysicalExpr>, lineage: &[Option<Origin>]) -> Option<Origin> {
     let column = expr.downcast_ref::<Column>()?;
     lineage.get(column.index()).copied().flatten()
 }
 
+/// Test whether the plan contains the join implementation from which Bloom can
+/// extract transfer edges.
 fn contains_hash_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.downcast_ref::<HashJoinExec>().is_some()
         || plan.children().into_iter().any(contains_hash_join)
 }
 
+/// Test whether a subtree crosses a join boundary. A subtree that does not is
+/// one atomic table operator, regardless of its internal local operations.
 fn contains_any_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.name().contains("JoinExec") || plan.children().into_iter().any(contains_any_join)
 }
 
+/// Identify physical wrappers that may change rows or ordering but not column
+/// identity.
 fn is_identity_wrapper(name: &str) -> bool {
     matches!(
         name,
@@ -277,6 +321,11 @@ fn is_identity_wrapper(name: &str) -> bool {
     )
 }
 
+/// Establish the conservative repeatability guarantee used by default.
+///
+/// A tree composed only of immutable in-memory leaves can be sampled and later
+/// executed again without observing a different relation. Other bounded
+/// sources require the caller's explicit repeatability promise.
 fn is_repeatable_memory_subtree(plan: &Arc<dyn ExecutionPlan>) -> bool {
     if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
         return source

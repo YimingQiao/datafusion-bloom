@@ -1,3 +1,9 @@
+//! Representative, query-independent source sampling for transfer estimates.
+//!
+//! Samples influence excitation and handoff cost estimates only. Bloom still
+//! executes every committed source exactly, and formal query results never
+//! depend on a sampled rowset.
+
 use super::*;
 
 #[derive(Debug)]
@@ -7,6 +13,9 @@ pub(super) struct SampledTable {
     pub(super) output_rows: usize,
 }
 
+/// Sample the sole source of a table operator, then execute the same local
+/// operator subtree over those rows. This preserves the semantics whose
+/// selectivity is being estimated without materializing the full table.
 pub(super) async fn sample_table(
     table: &BloomTable,
     target_rows: usize,
@@ -61,6 +70,9 @@ pub(super) async fn sample_table(
     }))
 }
 
+/// Reuse raw Parquet rows across queries while applying each query's pushed
+/// predicate and projection after the cache boundary. Cached data therefore
+/// remains source-specific rather than query-specific.
 async fn prepared_parquet_sample(
     source_plan: &Arc<dyn ExecutionPlan>,
     target_rows: usize,
@@ -134,6 +146,9 @@ async fn prepared_parquet_sample(
     Ok(Some((projected, prepared.input_rows)))
 }
 
+/// Bind a reusable sample to source snapshot identity, schema, and sampling
+/// target so detectable file replacement or schema evolution cannot reuse
+/// stale rows.
 fn prepared_parquet_sample_key(config: &FileScanConfig, target_rows: usize) -> String {
     let mut files = config
         .file_groups
@@ -176,6 +191,8 @@ fn prepared_parquet_sample_key(config: &FileScanConfig, target_rows: usize) -> S
     )
 }
 
+/// Spread a bounded number of short selections across the global table order.
+/// This avoids prefix bias while capping the number of Parquet access points.
 fn scattered_sample_files(
     config: &FileScanConfig,
     target_rows: usize,
@@ -292,6 +309,8 @@ fn collect_data_sources(
     }
 }
 
+/// Allocate sample capacity proportionally across in-memory partitions so one
+/// large or early partition cannot dominate the estimate.
 fn stratified_sample(partitions: &[Vec<RecordBatch>], target_rows: usize) -> Vec<Vec<RecordBatch>> {
     let partition_rows = partitions
         .iter()
@@ -331,6 +350,8 @@ fn stratified_sample(partitions: &[Vec<RecordBatch>], target_rows: usize) -> Vec
         .collect()
 }
 
+/// Take small windows across a partition rather than a single prefix, retaining
+/// coarse coverage without paying for per-row random sampling.
 fn sample_partition(partition: &[RecordBatch], quota: usize) -> Vec<RecordBatch> {
     const WINDOW_ROWS: usize = 32;
     let total_rows = partition.iter().map(RecordBatch::num_rows).sum::<usize>();

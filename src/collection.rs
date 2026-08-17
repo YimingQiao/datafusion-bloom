@@ -39,6 +39,11 @@ impl fmt::Debug for BloomCollection {
 }
 
 impl BloomCollection {
+    /// Establish the ownership and accounting boundary of a FullRows handoff.
+    ///
+    /// Materialization must never introduce rows or retain unaccounted Arrow
+    /// buffers. Once constructed, the collection is immutable and can safely
+    /// replace its table-operator leaf in the formal plan.
     pub(crate) fn try_new(
         mut partitions: Vec<Vec<RecordBatch>>,
         schema: SchemaRef,
@@ -126,6 +131,8 @@ impl BloomCollection {
         self.generation
     }
 
+    /// Expose the handoff as an ordinary DataFusion source without changing
+    /// its partitioning or copying its owned batches again.
     pub(crate) fn into_exec(
         self: Arc<Self>,
         label: impl Into<String>,

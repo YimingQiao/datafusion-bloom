@@ -23,6 +23,8 @@ pub struct BloomQueryPlanner {
 }
 
 impl BloomQueryPlanner {
+    /// Create a session-scoped planner. Prepared source data is intentionally
+    /// shared across queries, while every transfer graph remains query-scoped.
     pub fn new(config: BloomConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
@@ -47,6 +49,10 @@ pub fn install_bloom(state: SessionState, config: BloomConfig) -> Result<Session
 
 #[async_trait]
 impl QueryPlanner for BloomQueryPlanner {
+    /// Plan P0 and the formal query separately, run transfer between them, and
+    /// replace only table-operator leaves for which transfer produced a safe
+    /// handoff. Recoverable transfer failures abandon the whole rewrite so the
+    /// untouched native DataFusion plan remains the correctness fallback.
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,

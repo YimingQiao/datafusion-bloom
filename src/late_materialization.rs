@@ -1,3 +1,10 @@
+//! Experimental row-location handoff for local Parquet sources.
+//!
+//! Locations are a physical late-materialization representation, never part of
+//! Bloom's propagation state. The path is used only when file order and row
+//! offsets can be reconstructed exactly; every unsupported shape falls back to
+//! the default FullRows ownership boundary.
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::File;
@@ -58,6 +65,9 @@ pub(crate) struct PreparedRowGroupLayoutCache {
 }
 
 impl PreparedRowGroupLayoutCache {
+    /// Cache immutable row-group lengths under source snapshot identity. They
+    /// translate global offsets into reader selections but carry no query
+    /// predicate state.
     fn row_group_rows(&self, file: &PartitionedFile) -> Result<Arc<Vec<usize>>> {
         let key = format!(
             "{}|{}|{:?}|{:?}|{:?}",
@@ -198,6 +208,9 @@ fn log_location_fallback(enabled: bool, reason: &str) {
 }
 
 impl RowLocationLayout {
+    /// Measure the real second-read envelope after locations are known. This is
+    /// the storage-policy gate that catches selective yet widely scattered
+    /// results missed by cardinality estimates alone.
     pub(crate) fn locality(&self, partitions: &[Vec<RecordBatch>]) -> Result<RowLocationLocality> {
         let selected = collect_locations(partitions, self.files.len())?;
         let selected_rows = selected.iter().map(Vec::len).sum();
@@ -237,6 +250,8 @@ impl RowLocationLayout {
         })
     }
 
+    /// Re-read all query-required payload columns at the exact positions
+    /// materialized by transfer, without re-running verified local predicates.
     pub(crate) fn rewrite_formal_plan(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -270,6 +285,8 @@ impl RowLocationLayout {
         )?))
     }
 
+    /// Translate stable whole-file offsets into per-row-group access plans and
+    /// replace only the Parquet source under the original table operators.
     fn rewrite_with_selected_locations(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -316,6 +333,9 @@ fn consecutive_run_count(offsets: &[usize]) -> usize {
         .count()
 }
 
+/// Reconstruct one canonical whole-file entry from DataFusion's possibly split
+/// scan groups. Any gap or unknown extension makes physical offsets unsafe and
+/// disables the optimization.
 pub(crate) fn canonical_files(config: &FileScanConfig) -> Result<Vec<PartitionedFile>> {
     let mut by_path: BTreeMap<String, Vec<PartitionedFile>> = BTreeMap::new();
     for file in config.file_groups.iter().flat_map(FileGroup::iter) {
@@ -377,6 +397,8 @@ pub(crate) fn local_path(file: &PartitionedFile) -> PathBuf {
     }
 }
 
+/// Extract, sort, and deduplicate the synthetic physical identities retained
+/// by the transfer handoff.
 fn collect_locations(
     partitions: &[Vec<RecordBatch>],
     file_count: usize,
@@ -415,6 +437,8 @@ fn collect_locations(
     Ok(selected)
 }
 
+/// Convert whole-file row offsets into exact Parquet row selections, rejecting
+/// offsets that cannot belong to the cached immutable layout.
 fn access_plan(row_group_rows: &[usize], offsets: Vec<usize>) -> Result<ParquetAccessPlan> {
     let mut plan = ParquetAccessPlan::new_all(row_group_rows.len());
     let mut offset_index = 0;
@@ -488,6 +512,9 @@ fn plan_at_path(plan: &Arc<dyn ExecutionPlan>, path: &[usize]) -> Result<Arc<dyn
     Ok(current)
 }
 
+/// Carry synthetic location columns through the unary table-operator subtree.
+/// Schema-changing operators are accepted only when their output can be
+/// extended explicitly; ambiguous transformations abandon the fast path.
 fn append_locations_at_path(
     plan: Arc<dyn ExecutionPlan>,
     path: &[usize],
@@ -569,12 +596,16 @@ fn replace_at_path(
     plan.with_new_children(children)
 }
 
+/// Assign original offsets while reading a canonical, unfiltered whole-file
+/// stream. One input partition corresponds to one stable file identity.
 struct RowLocationExec {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
     cache: Arc<PlanProperties>,
 }
 
+/// Reattach positions already known by a selected re-read, allowing a later
+/// transfer round to retain the same source identity without recomputation.
 struct KnownRowLocationExec {
     input: Arc<dyn ExecutionPlan>,
     locations: Arc<Vec<Vec<usize>>>,

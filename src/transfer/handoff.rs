@@ -1,5 +1,7 @@
 use super::*;
 
+/// Commit a propagation source exactly once, then catch its handoff up with
+/// any restrictions learned since that first materialization.
 pub(super) async fn ensure_transfer_handoff(
     table: &BloomTable,
     runtime: &mut TableRuntime,
@@ -40,6 +42,11 @@ pub(super) async fn ensure_transfer_handoff(
     )
 }
 
+/// Materialize a transfer result using the handoff policy, independently of
+/// the scheduler that selected this source.
+///
+/// RowLocations is speculative: unsupported plans or poor observed locality
+/// fall back to FullRows, which remains the default and correctness baseline.
 pub(super) async fn collect_transfer_handoff(
     request: HandoffRequest<'_>,
     services: &HandoffServices,
@@ -168,6 +175,9 @@ struct FullRowsRequest<'a> {
     log_transfer_steps: bool,
 }
 
+/// Build Bloom's default handoff by reading every query-required column,
+/// applying current transfer restrictions, and resetting Arrow ownership
+/// before the batches enter formal execution.
 async fn collect_full_rows_handoff(
     request: FullRowsRequest<'_>,
     context: Arc<TaskContext>,
@@ -236,6 +246,9 @@ async fn collect_full_rows_handoff(
     ))
 }
 
+/// Discover stable positions using only local-predicate columns, then re-read
+/// transfer keys at those positions and apply incoming membership. Wide query
+/// payload remains deferred until formal execution.
 async fn collect_two_pass_row_location_handoff(
     table: &BloomTable,
     filters: &[CascadeFilter],
@@ -361,6 +374,8 @@ fn project_plan_columns(
     ProjectionPushdown::new().optimize(projected, options.as_ref())
 }
 
+/// Form the narrow discovery pass from columns needed to prove P0's local
+/// predicates; join keys and query payload are intentionally excluded here.
 fn project_local_filter_columns(
     table: &BloomTable,
     context: &TaskContext,
@@ -512,6 +527,9 @@ fn remap_filters(
         .collect()
 }
 
+/// Remove local predicates only after retained locations prove those rows have
+/// already passed P0. Projections are reconstructed so the table-operator
+/// schema remains unchanged for the subsequent selected re-read.
 pub(super) fn strip_verified_local_filters(
     plan: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -603,6 +621,8 @@ fn strip_parquet_source_predicates(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<d
     plan.with_new_children(rewritten)
 }
 
+/// Keep independently built transfer predicates as sequential stages so cheap
+/// membership can reduce rows before expensive local/string expressions.
 fn transfer_filter_plan(
     plan: Arc<dyn ExecutionPlan>,
     filters: &[CascadeFilter],
@@ -642,6 +662,8 @@ fn cascade_predicates(
     Ok(predicates)
 }
 
+/// Collect all keys a row-location handoff may need in later propagation
+/// rounds. Omitting one would make the physical representation non-transitive.
 pub(super) fn required_join_columns(graph: &BloomGraph, table: TableId) -> Result<Vec<usize>> {
     let mut columns = BTreeSet::new();
     for edge in &graph.edges {
@@ -664,6 +686,8 @@ pub(super) fn required_join_columns(graph: &BloomGraph, table: TableId) -> Resul
     Ok(columns.into_iter().collect())
 }
 
+/// Measure widths only when cost-based late materialization is enabled;
+/// FullRows does not require sampling to establish its semantics.
 pub(super) fn materialization_widths(
     policy: HandoffPolicy,
     sample: Option<&[Vec<RecordBatch>]>,
@@ -681,6 +705,8 @@ pub(super) fn materialization_widths(
     }
 }
 
+/// Classify ordering cost conservatively: transferred membership is cheap,
+/// while expressions touching variable-width payload should run last.
 pub(super) fn predicate_is_expensive(predicate: &Arc<dyn PhysicalExpr>, schema: &Schema) -> bool {
     if contains_cascade_predicate(predicate) {
         return false;
@@ -728,6 +754,9 @@ pub(super) fn formal_transfer_scan_plan(
     transfer_scan_plan_impl(plan, filters, context, true, parquet_membership_placement)
 }
 
+/// Add only Bloom's incremental predicates to an already optimized P0 tree.
+/// Existing local predicates retain their meaning and placement; the formal
+/// boundary controls whether membership may enter the Parquet reader.
 fn transfer_scan_plan_impl(
     plan: Arc<dyn ExecutionPlan>,
     filters: &[CascadeFilter],
@@ -847,6 +876,9 @@ fn contains_cascade_predicate(predicate: &Arc<dyn PhysicalExpr>) -> bool {
             .any(|child| contains_cascade_predicate(child))
 }
 
+/// Derive redundant Parquet pruning bounds from exact integer membership.
+/// These bounds may discard storage regions, but membership remains the
+/// semantic predicate that decides which rows survive transfer.
 fn integer_pruning_predicates(
     predicates: &[Arc<dyn PhysicalExpr>],
     schema: &Schema,

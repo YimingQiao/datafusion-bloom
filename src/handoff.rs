@@ -2,8 +2,11 @@ use datafusion::arrow::datatypes::{DataType, Schema};
 
 use crate::config::HandoffPolicy;
 
+// This policy is deliberately independent from propagation scheduling. It
+// chooses how an already selected transfer source crosses into formal
+// execution; it never decides whether information should continue propagating.
 // Row locations have fixed setup and random-access costs that a simple row
-// count ratio does not capture. Keep the experimental policy conservative.
+// count ratio does not capture, so the experimental path is conservative.
 const MIN_FULL_PAYLOAD_BYTES: u128 = 64 * 1024 * 1024;
 const MIN_WIDTH_SAVING_BYTES: usize = 192;
 const MIN_WIDTH_RATIO: usize = 6;
@@ -14,8 +17,11 @@ const REQUIRED_COST_ADVANTAGE: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MaterializationStrategy {
+    /// Read and own every query-required column at the transfer boundary.
     FullRows,
+    /// Retain stable source positions and defer wide payload columns.
     RowLocations,
+    /// Discover positions with local columns before reading transfer keys.
     TwoPassRowLocations,
 }
 
@@ -44,6 +50,12 @@ pub(crate) struct RowLocationLocality {
     pub(crate) touched_row_group_rows: usize,
 }
 
+/// Choose only the physical representation of a transfer handoff.
+///
+/// FullRows is Bloom's default semantics. Late materialization is admitted
+/// only when the estimated I/O saving is large enough to pay for a second
+/// Parquet access; observed row locality is validated separately after the
+/// candidate locations are known.
 pub(crate) fn choose_materialization(
     policy: HandoffPolicy,
     facts: MaterializationFacts,
@@ -107,6 +119,11 @@ fn full_rows(reason: &'static str) -> MaterializationDecision {
     }
 }
 
+/// Apply the second, storage-aware gate for late materialization.
+///
+/// A selective result can still be expensive when it touches most row groups.
+/// This rejects handoffs whose random access and decode amplification would
+/// likely cost more than materializing FullRows once.
 pub(crate) fn row_locations_are_concentrated(locality: RowLocationLocality) -> bool {
     if locality.selected_rows == 0 {
         return false;

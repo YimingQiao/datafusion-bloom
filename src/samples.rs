@@ -41,6 +41,8 @@ pub(crate) struct PreparedSourceSample {
 }
 
 impl PreparedSourceSample {
+    /// Bind cached Arrow buffers to DataFusion's memory pool for the lifetime
+    /// of the reusable, query-independent sample.
     pub(crate) fn try_new(
         partitions: Vec<Vec<RecordBatch>>,
         schema: SchemaRef,
@@ -66,6 +68,9 @@ impl PreparedSourceSample {
 }
 
 impl PreparedSampleCache {
+    /// Return one prepared source snapshot per cache key. The installed
+    /// `OnceCell` makes concurrent cache misses single-flight, so a long-lived
+    /// session never scans the same immutable source twice in parallel.
     pub(crate) async fn get_or_try_init<F, Fut>(
         &self,
         key: String,
@@ -82,6 +87,8 @@ impl PreparedSampleCache {
         Ok(Arc::clone(prepared))
     }
 
+    /// Release reusable samples before falling back after resource exhaustion;
+    /// query-local materializations are owned elsewhere and are unaffected.
     pub(crate) fn clear(&self) -> Result<()> {
         let mut entries = self.entries.lock().map_err(|_| poisoned())?;
         entries.samples.clear();
@@ -89,6 +96,9 @@ impl PreparedSampleCache {
         Ok(())
     }
 
+    /// Admit a build before it starts and evict completed entries only. An
+    /// in-flight entry may temporarily exceed the bound to preserve
+    /// single-flight behavior.
     fn cell(&self, key: String) -> Result<SampleCell> {
         let mut entries = self.entries.lock().map_err(|_| poisoned())?;
         if let Some(cell) = entries.samples.get(&key).cloned() {

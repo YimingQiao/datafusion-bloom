@@ -94,6 +94,11 @@ struct HandoffData {
     reservation: Option<MemoryReservation>,
 }
 
+/// Query-local result of committing a table as a transfer source.
+///
+/// The scheduler only reasons about cardinality and lineage. This enum records
+/// the independently chosen physical handoff: either owned query columns or
+/// stable source positions plus the transfer columns needed by later rounds.
 #[derive(Debug)]
 enum TransferHandoff {
     FullRows(HandoffData),
@@ -437,6 +442,12 @@ impl BloomTransferEngine {
         }
     }
 
+    /// Run Bloom's transfer fixed point and splice its final handoffs into an
+    /// independently planned native join tree.
+    ///
+    /// Temporary membership structures and samples guide P0 only. They enter
+    /// formal execution solely through the explicit FullRows, RowLocations, or
+    /// Direct handoff selected during finalization.
     pub(crate) async fn rewrite(
         &self,
         transfer_plan: Arc<dyn ExecutionPlan>,
@@ -694,6 +705,12 @@ impl BloomTransferEngine {
         Ok(rewritten)
     }
 
+    /// Close the transfer phase and atomically construct the inputs consumed by
+    /// formal execution.
+    ///
+    /// Sources already committed during propagation retain their handoff.
+    /// Terminal single-key destinations may attach membership directly to the
+    /// formal scan; all other filtered destinations are materialized exactly.
     async fn finish_handoffs(
         &self,
         formal_plan: Arc<dyn ExecutionPlan>,
@@ -894,6 +911,9 @@ impl BloomTransferEngine {
     }
 }
 
+/// Establish each table's scheduling baseline without committing a handoff.
+/// Local predicates may be sampled to estimate their reduction, but samples
+/// never become formal query data or proof of emptiness.
 async fn initialize_tables(
     graph: &BloomGraph,
     config: &BloomConfig,
@@ -946,6 +966,8 @@ async fn initialize_tables(
     try_join_all(jobs).await
 }
 
+/// Seed propagation using cardinality reduction alone. Storage representation
+/// and row-location locality deliberately do not participate in excitation.
 fn initial_active_tables(tables: &[TableRuntime], config: &BloomConfig) -> BTreeSet<TableId> {
     tables
         .iter()
@@ -957,6 +979,8 @@ fn initial_active_tables(tables: &[TableRuntime], config: &BloomConfig) -> BTree
         .collect()
 }
 
+/// Prefer the smallest currently useful source, matching Bloom's strategy of
+/// propagating the cheapest, most selective rowset first.
 fn pop_smallest_active(active: &mut BTreeSet<TableId>, tables: &[TableRuntime]) -> Option<TableId> {
     let best = active.iter().copied().min_by(|left, right| {
         tables[*left]
@@ -968,6 +992,8 @@ fn pop_smallest_active(active: &mut BTreeSet<TableId>, tables: &[TableRuntime]) 
     Some(best)
 }
 
+/// Retain only adjacent directions that can carry lineage not already known at
+/// the destination. This is what lets cyclic join graphs reach a fixed point.
 fn collect_outgoing_edges(
     source: TableId,
     graph: &BloomGraph,
@@ -1011,6 +1037,8 @@ fn direct_edge(edge: &BloomEdge, source: TableId) -> Option<DirectedEdge> {
     }
 }
 
+/// Give a composite edge a stable key order. Equivalent transfers can then
+/// share one filter build and hash the same tuple layout in both directions.
 fn canonicalize_directed_edge(mut edge: DirectedEdge) -> Result<DirectedEdge> {
     if edge.source_keys.len() != edge.destination_keys.len() {
         return internal_err!(
@@ -1037,6 +1065,9 @@ fn canonicalize_directed_edge(mut edge: DirectedEdge) -> Result<DirectedEdge> {
     Ok(edge)
 }
 
+/// Apply propagation received after a source was first materialized, then
+/// restore the handoff's ownership invariant. FullRows reserves the temporary
+/// old-plus-new peak before compaction so memory pressure triggers fallback.
 fn compact_handoff(
     runtime: &mut TableRuntime,
     random_state: &RandomState,
@@ -1073,6 +1104,8 @@ fn compact_handoff(
     Ok(())
 }
 
+/// Keep at most the strongest known lineage restriction for a given key
+/// vector. Replacing an applied restriction reopens the handoff for compaction.
 fn install_cascade_filter(runtime: &mut TableRuntime, incoming: CascadeFilter) -> bool {
     for existing in &mut runtime.pending_filters {
         if key_signature(&existing.keys) != key_signature(&incoming.keys) {
@@ -1094,6 +1127,8 @@ fn install_cascade_filter(runtime: &mut TableRuntime, incoming: CascadeFilter) -
     true
 }
 
+/// Resolve outgoing transfers against the lineage-aware cache and coalesce
+/// equal key vectors into one physical filter build over the source handoff.
 fn prepare_activations(
     source: TableId,
     edges: &[DirectedEdge],
@@ -1205,6 +1240,8 @@ fn build_transfer_filters(
     Ok(filters.into_iter().map(Arc::new).collect())
 }
 
+/// Admit exact integer membership only for a bounded or sufficiently dense
+/// domain; sparse wide domains stay on the fixed-size probabilistic path.
 fn dense_integer_bits(minimum: i128, maximum: i128, rows: usize) -> Option<usize> {
     let range = maximum.checked_sub(minimum)?;
     let span = range.checked_add(1)?;
@@ -1215,6 +1252,9 @@ fn dense_integer_bits(minimum: i128, maximum: i128, rows: usize) -> Option<usize
     usize::try_from(span).ok()
 }
 
+/// Estimate the cardinality after all current transfers without changing the
+/// formal handoff policy. Existing handoffs yield exact survivor counts;
+/// otherwise a bounded sample drives scheduling only.
 async fn estimate_destination(
     table: &BloomTable,
     runtime: &mut TableRuntime,
@@ -1270,6 +1310,8 @@ async fn estimate_destination(
     Ok(runtime.initial_estimate * survivors as f64 / sampled_rows as f64)
 }
 
+/// Evaluate transfer membership for an estimate without mutating or
+/// re-owning the sampled/materialized batches.
 fn count_survivors(
     partitions: &[Vec<RecordBatch>],
     filters: &[CascadeFilter],
@@ -1289,6 +1331,8 @@ fn count_survivors(
     Ok(total)
 }
 
+/// Physically apply newly arrived transfer restrictions and immediately reset
+/// batch ownership, preventing filtered views from retaining their old input.
 fn apply_filters(
     partitions: Vec<Vec<RecordBatch>>,
     filters: &[CascadeFilter],
@@ -1321,6 +1365,8 @@ fn apply_filters(
         .collect()
 }
 
+/// Use exact bitmap membership when possible, otherwise hash the complete
+/// composite key into the probabilistic structure built by the source.
 fn evaluate_membership(
     batch: &RecordBatch,
     keys: &[Arc<dyn PhysicalExpr>],
@@ -1399,6 +1445,9 @@ fn estimated_rows(plan: &Arc<dyn ExecutionPlan>) -> Result<Option<usize>> {
         .copied())
 }
 
+/// Recover the population entering a table-operator subtree rather than its
+/// possibly filtered output statistics. This is the denominator for local
+/// selectivity and never an exact formal-result claim.
 fn source_rows(plan: &Arc<dyn ExecutionPlan>) -> Result<Option<usize>> {
     let children = plan.children();
     if children.is_empty() {
@@ -1450,6 +1499,8 @@ fn contains_parquet_source(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.children().into_iter().any(contains_parquet_source)
 }
 
+/// Replace one analyzed table-operator leaf while preserving every operator in
+/// the separately planned native join tree.
 fn replace_at_path(
     plan: Arc<dyn ExecutionPlan>,
     path: &[usize],
