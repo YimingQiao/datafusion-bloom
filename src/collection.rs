@@ -46,6 +46,7 @@ impl BloomCollection {
         generation: u64,
         label: &str,
         context: &TaskContext,
+        reservation: Option<MemoryReservation>,
     ) -> Result<Arc<Self>> {
         if partitions.is_empty() {
             partitions.push(vec![]);
@@ -74,9 +75,15 @@ impl BloomCollection {
             .map(|array| array.get_array_memory_size())
             .sum();
 
-        let reservation = MemoryConsumer::new(format!("BloomCollection[{label}]"))
-            .register(context.memory_pool());
-        reservation.try_grow(byte_size)?;
+        let reservation = if let Some(reservation) = reservation {
+            reservation.try_resize(byte_size)?;
+            reservation
+        } else {
+            let reservation = MemoryConsumer::new(format!("BloomCollection[{label}]"))
+                .register(context.memory_pool());
+            reservation.try_grow(byte_size)?;
+            reservation
+        };
 
         Ok(Arc::new(Self {
             schema,

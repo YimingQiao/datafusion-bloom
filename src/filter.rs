@@ -3,17 +3,22 @@ use datafusion::arrow::array::{
     UInt16Array, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::buffer::BooleanBuffer;
+use datafusion::common::Result;
+use datafusion::execution::TaskContext;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 
-/// A compact membership structure used only while the transfer phase is running.
+/// A compact membership structure produced by transfer.
 ///
-/// The filter is deliberately private to the crate: formal query execution
-/// consumes materialized `RecordBatch`es, not this structure.
-#[derive(Debug, Clone)]
+/// Most instances are temporary; a terminal Direct handoff may retain one in
+/// the formal scan. Its storage therefore remains registered with DataFusion's
+/// memory pool for exactly as long as the structure is reachable.
+#[derive(Debug)]
 pub(crate) struct TransferBloomFilter {
     storage: FilterStorage,
+    _reservation: Option<MemoryReservation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum FilterStorage {
     Bloom {
         words: Box<[u64]>,
@@ -29,13 +34,9 @@ enum FilterStorage {
 }
 
 impl TransferBloomFilter {
+    #[cfg(test)]
     pub(crate) fn with_capacity(expected_items: usize, false_positive_rate: f64) -> Self {
-        let item_count = expected_items.max(1);
-        let ln_2 = std::f64::consts::LN_2;
-        let ideal_bits = -((item_count as f64) * false_positive_rate.ln()) / (ln_2 * ln_2);
-        let bit_count = (ideal_bits.ceil() as usize).max(64).next_power_of_two();
-        let probes = (((bit_count as f64 / item_count as f64) * ln_2).round() as u32).clamp(1, 16);
-
+        let (bit_count, probes) = bloom_shape(expected_items, false_positive_rate);
         Self {
             storage: FilterStorage::Bloom {
                 words: vec![0; bit_count / 64].into_boxed_slice(),
@@ -43,10 +44,30 @@ impl TransferBloomFilter {
                 probes,
                 is_empty: true,
             },
+            _reservation: None,
         }
     }
 
+    pub(crate) fn try_with_capacity(
+        expected_items: usize,
+        false_positive_rate: f64,
+        context: &TaskContext,
+    ) -> Result<Self> {
+        let (bit_count, probes) = bloom_shape(expected_items, false_positive_rate);
+        let reservation = reserve_filter_bytes(bit_count.div_ceil(8), context)?;
+        Ok(Self {
+            storage: FilterStorage::Bloom {
+                words: vec![0; bit_count / 64].into_boxed_slice(),
+                bit_mask: bit_count - 1,
+                probes,
+                is_empty: true,
+            },
+            _reservation: Some(reservation),
+        })
+    }
+
     /// Build an exact bitmap when an integer domain is compact enough.
+    #[cfg(test)]
     pub(crate) fn dense_integer(minimum: i128, maximum: i128, max_bits: usize) -> Option<Self> {
         let span = maximum.checked_sub(minimum)?.checked_add(1)?;
         let bit_count = usize::try_from(span).ok()?;
@@ -59,7 +80,38 @@ impl TransferBloomFilter {
                 minimum,
                 maximum,
             },
+            _reservation: None,
         })
+    }
+
+    pub(crate) fn try_dense_integer(
+        minimum: i128,
+        maximum: i128,
+        max_bits: usize,
+        context: &TaskContext,
+    ) -> Result<Option<Self>> {
+        let Some(span) = maximum
+            .checked_sub(minimum)
+            .and_then(|span| span.checked_add(1))
+        else {
+            return Ok(None);
+        };
+        let Ok(bit_count) = usize::try_from(span) else {
+            return Ok(None);
+        };
+        if bit_count == 0 || bit_count > max_bits {
+            return Ok(None);
+        }
+        let word_count = bit_count.div_ceil(64);
+        let reservation = reserve_filter_bytes(word_count.saturating_mul(8), context)?;
+        Ok(Some(Self {
+            storage: FilterStorage::DenseInteger {
+                words: vec![0; word_count].into_boxed_slice(),
+                minimum,
+                maximum,
+            },
+            _reservation: Some(reservation),
+        }))
     }
 
     pub(crate) fn is_dense_integer(&self) -> bool {
@@ -189,6 +241,22 @@ impl TransferBloomFilter {
             }
         }
     }
+}
+
+fn bloom_shape(expected_items: usize, false_positive_rate: f64) -> (usize, u32) {
+    let item_count = expected_items.max(1);
+    let ln_2 = std::f64::consts::LN_2;
+    let ideal_bits = -((item_count as f64) * false_positive_rate.ln()) / (ln_2 * ln_2);
+    let bit_count = (ideal_bits.ceil() as usize).max(64).next_power_of_two();
+    let probes = (((bit_count as f64 / item_count as f64) * ln_2).round() as u32).clamp(1, 16);
+    (bit_count, probes)
+}
+
+fn reserve_filter_bytes(bytes: usize, context: &TaskContext) -> Result<MemoryReservation> {
+    let reservation =
+        MemoryConsumer::new("BloomTransferMembership").register(context.memory_pool());
+    reservation.try_grow(bytes)?;
+    Ok(reservation)
 }
 
 #[inline]

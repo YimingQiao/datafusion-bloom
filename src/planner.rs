@@ -8,6 +8,7 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 
+use crate::compat::{is_recoverable_transfer_error, is_resource_exhausted};
 use crate::config::BloomConfig;
 use crate::late_materialization::PreparedRowGroupLayoutCache;
 use crate::samples::PreparedSampleCache;
@@ -90,9 +91,22 @@ impl QueryPlanner for BloomQueryPlanner {
             Arc::clone(&self.samples),
             Arc::clone(&self.row_group_layouts),
         );
-        let rewritten = transfer
-            .rewrite(p0, formal_plan, session_state.task_ctx())
-            .await?;
+        let rewritten = match transfer
+            .rewrite(p0, Arc::clone(&formal_plan), session_state.task_ctx())
+            .await
+        {
+            Ok(rewritten) => rewritten,
+            Err(error) if is_recoverable_transfer_error(&error) => {
+                if is_resource_exhausted(&error) {
+                    self.samples.clear()?;
+                }
+                if self.config.log_transfer_steps {
+                    eprintln!("[Bloom] fallback=native reason={error}");
+                }
+                formal_plan
+            }
+            Err(error) => return Err(error),
+        };
 
         if self.config.reoptimize {
             default_planner.optimize_physical_plan(rewritten, session_state, |_, _| {})

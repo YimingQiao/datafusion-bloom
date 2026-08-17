@@ -30,4 +30,24 @@ jobs:
       - name: Test
         run: cargo test --lib --tests
       - name: Clippy
-        run: cargo clippy --lib --tests --benches -- -D warnings
+        run: cargo clippy --lib --tests --benches --examples -- -D warnings
+
+  latest-compatible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve latest compatible dependencies
+        run: cargo update
+      - name: Check latest DataFusion 54.x resolution
+        run: cargo check --all-targets
+
+  minimum-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check declared MSRV
+        run: cargo check --all-targets

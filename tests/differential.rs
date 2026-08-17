@@ -91,7 +91,7 @@ fn register(context: &SessionContext, name: &str, partitions: Vec<Vec<RecordBatc
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn randomized_nullable_composite_joins_match_datafusion() -> Result<()> {
     for seed in 0..12_u64 {
         let a = make_partitions(seed * 3 + 1, 1_000)?;

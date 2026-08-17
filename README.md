@@ -39,6 +39,9 @@ and runs its stock joins, aggregates, exchanges, and output operators.
   bounds for exact integer domains.
 - **Native formal execution.** Bloom does not add a join operator or rerun join
   ordering by default. Exact joins still determine the final result.
+- **Fail-open planning.** Unsupported shapes keep DataFusion's native plan;
+  recoverable transfer or memory-pool failures release temporary handoffs and
+  use that same native plan.
 
 ## Algorithm lineage
 
@@ -62,13 +65,13 @@ thread, the Parquet pages are prewarmed outside query timing, and the table
 reports one complete measured pass over every query. SQL planning, transfer,
 materialization, joins, aggregation, and full output consumption are included.
 
-| Workload | Parquet | Queries | DataFusion | Bloom | Total | Geo. mean | Faster |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| CEB IMDB | 1.43 GB, compressed | 3,133 | 3,948.177 s | 2,119.400 s | **1.863×** | 1.390× | 2,799/3,133 |
-| JOB | 1.43 GB, compressed | 113 | 102.378 s | 69.398 s | **1.475×** | 1.409× | 91/113 |
-| JOB | 2.58 GB, uncompressed | 113 | 78.025 s | 45.613 s | **1.711×** | 1.638× | 99/113 |
-| STATS-CEB | 12.9 MB, compressed | 146 | 186.347 s | 174.083 s | **1.070×** | 1.058× | 57/146 |
-| TPC-H SF10 | 2.47 GB, compressed | 22 | 83.506 s | 74.437 s | **1.122×** | 1.077× | 13/22 |
+| Workload | Parquet | Queries | DataFusion | Bloom | Total speedup |
+|---|---:|---:|---:|---:|---:|
+| CEB IMDB | 1.43 GB, compressed | 3,133 | 3,948.177 s | 2,119.400 s | **1.863×** |
+| JOB | 1.43 GB, compressed | 113 | 102.378 s | 69.398 s | **1.475×** |
+| JOB | 2.58 GB, uncompressed | 113 | 78.025 s | 45.613 s | **1.711×** |
+| STATS-CEB | 12.9 MB, compressed | 146 | 186.347 s | 174.083 s | **1.070×** |
+| TPC-H SF10 | 2.47 GB, compressed | 22 | 83.506 s | 74.437 s | **1.122×** |
 
 All 3,527 Baseline/Bloom result pairs produced identical complete-output
 fingerprints. Both sides use the same files, filter pushdown, native 8,192-row
@@ -84,10 +87,11 @@ commands and the guarded-cast normalization required by CEB.
 
 ## Compatibility
 
-This preview targets exactly Apache DataFusion `54.1.0` and Rust `1.88` or
-newer. The exact dependency is intentional because the implementation uses
-DataFusion physical-plan, filter-pushdown, and Parquet-reader interfaces that
-can change between releases.
+This preview supports the Cargo SemVer-compatible Apache DataFusion `54.x`
+line starting at `54.1.0`, and Rust `1.88` or newer. CI tests both the committed
+lockfile and a fresh latest-compatible dependency resolution. DataFusion major
+versions may change physical-planner interfaces and receive a separately tested
+Bloom release rather than being accepted silently.
 
 Bloom currently supports bounded inner equi-join graphs whose join keys can be
 traced to table columns, including nullable and composite keys. Unsupported
@@ -171,6 +175,12 @@ The main configuration fields are:
 `with_transfer_logging()` prints propagation decisions, materialization phases,
 handoff counts, and scan metrics. `with_post_scan_membership()` retains an A/B
 path for investigating unusual Parquet-reader regressions.
+
+FullRows handoffs and prepared samples reserve their retained Arrow bytes in
+DataFusion's memory pool. If transfer cannot obtain or grow that reservation,
+Bloom discards its temporary state and leaves the query on the native plan.
+Prepared samples are single-flight across concurrent queries and retained in a
+bounded session cache.
 
 ## Correctness
 

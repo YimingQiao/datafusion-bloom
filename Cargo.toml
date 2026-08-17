@@ -5,19 +5,21 @@ edition = "2024"
 rust-version = "1.88"
 description = "Bloom transfer extension for Apache DataFusion"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/YimingQiao/datafusion-bloom"
 keywords = ["arrow", "datafusion", "join", "query-optimizer"]
 categories = ["database"]
 
 [dependencies]
 async-trait = "0.1"
-datafusion = { version = "=54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
-datafusion-datasource = "=54.1.0"
+datafusion = { version = "54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
+datafusion-datasource = "54.1.0"
 futures = "0.3"
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
-datafusion = { version = "=54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 
 [[bench]]
 name = "synthetic"

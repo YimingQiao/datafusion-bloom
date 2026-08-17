@@ -6,12 +6,14 @@
 //! a direct scan with transfer membership attached to the Parquet reader.
 
 mod collection;
+mod compat;
 mod config;
 mod filter;
 mod graph;
 mod handoff;
 mod late_materialization;
 mod lineage;
+mod materialization;
 mod planner;
 mod samples;
 mod transfer;
