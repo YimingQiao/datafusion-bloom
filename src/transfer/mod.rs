@@ -1,10 +1,17 @@
+//! Bloom's query-local transfer phase.
+//!
+//! The scheduler in this module reasons only about graph propagation and
+//! cardinality. Its supporting modules keep the physical concerns separate:
+//! sampling estimates reductions, policy chooses a handoff representation,
+//! handoff builds it, materialization establishes owned Arrow buffers, and
+//! row_locations implements the optional late-materialization path.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanArray, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
@@ -25,7 +32,7 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::logical_expr::{ColumnarValue, Operator};
-use datafusion::parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection};
+use datafusion::parquet::arrow::arrow_reader::RowSelection;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
 use datafusion::physical_expr::utils::{conjunction, split_conjunction};
@@ -34,11 +41,17 @@ use datafusion::physical_optimizer::filter_pushdown::FilterPushdown as FilterPus
 use datafusion::physical_optimizer::projection_pushdown::ProjectionPushdown;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
 use datafusion::physical_plan::execution_plan::CardinalityEffect;
-use datafusion::physical_plan::execution_plan::{collect_partitioned, reset_plan_states};
+use datafusion::physical_plan::execution_plan::{
+    collect_partitioned, execute_stream_partitioned, reset_plan_states,
+};
 use datafusion::physical_plan::filter::{FilterExec, FilterExecBuilder};
 use datafusion::physical_plan::filter_pushdown::{
     ChildFilterPushdownResult, ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
     PushedDown,
+};
+use datafusion::physical_plan::joins::{
+    CrossJoinExec, HashJoinExec, NestedLoopJoinExec, PartitionMode, PiecewiseMergeJoinExec,
+    SortMergeJoinExec, SymmetricHashJoinExec,
 };
 use datafusion::physical_plan::limit::LocalLimitExec;
 use datafusion::physical_plan::projection::ProjectionExec;
@@ -47,34 +60,41 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
     SendableRecordBatchStream, with_new_children_if_necessary,
 };
+use futures::TryStreamExt;
 use futures::future::try_join_all;
 
-use crate::collection::BloomCollection;
-use crate::config::{BloomConfig, HandoffPolicy, ParquetMembershipPlacement};
-use crate::filter::TransferBloomFilter;
-use crate::graph::{BloomEdge, BloomGraph, BloomTable, TableId};
-use crate::handoff::{
+use self::materialization::{
+    MaterializedPartitionBuilder, batch_physical_bytes, compact_materialized_partition,
+    observed_handoff_widths, partition_physical_bytes,
+};
+use self::policy::{
     MaterializationFacts, MaterializationStrategy, choose_materialization,
     estimated_projection_width, estimated_schema_width, row_locations_are_concentrated,
 };
-use crate::late_materialization::{
-    PreparedRowGroupLayoutCache, RowLocationLayout, canonical_files, local_path,
-    try_prepare_location_plan,
-};
+use self::row_locations::{RowLocationLayout, canonical_files, try_prepare_location_plan};
+use self::sample_cache::PreparedSourceSample;
+use crate::collection::BloomCollection;
+use crate::config::{BloomConfig, HandoffPolicy, ParquetMembershipPlacement, SamplingMode};
+use crate::filter::TransferBloomFilter;
+use crate::graph::{BloomEdge, BloomGraph, BloomTable, TableId};
 use crate::lineage::{LineageSnapshot, LineageTracker};
-use crate::materialization::{
-    compact_materialized_partition, compact_materialized_partitions, observed_handoff_widths,
-    partition_physical_bytes,
-};
-use crate::samples::{PreparedSampleCache, PreparedSourceSample};
 
-mod sampling;
-use sampling::sample_table;
+// Physical transfer lifecycle. These modules must not feed storage-specific
+// facts back into the propagation scheduler above.
 mod handoff;
 use handoff::{
     collect_transfer_handoff, ensure_transfer_handoff, formal_transfer_scan_plan,
     materialization_widths, required_join_columns, strip_verified_local_filters,
 };
+mod materialization;
+mod policy;
+mod row_locations;
+mod sample_cache;
+mod sampling;
+use sampling::sample_table;
+
+pub(crate) use row_locations::RowGroupLayoutCache;
+pub(crate) use sample_cache::PreparedSampleCache;
 
 const HASH_SEED: u64 = 0x424c_4f4f_4d44_4631;
 
@@ -82,7 +102,7 @@ const HASH_SEED: u64 = 0x424c_4f4f_4d44_4631;
 pub(crate) struct BloomTransferEngine {
     config: BloomConfig,
     samples: Arc<PreparedSampleCache>,
-    row_group_layouts: Arc<PreparedRowGroupLayoutCache>,
+    row_group_layouts: Arc<RowGroupLayoutCache>,
 }
 
 #[derive(Debug)]
@@ -234,8 +254,10 @@ struct TableRuntime {
 struct HandoffServices {
     policy: HandoffPolicy,
     parquet_membership_placement: ParquetMembershipPlacement,
+    sampling_mode: SamplingMode,
+    instant_parquet_row_groups: usize,
     log_steps: bool,
-    row_group_layouts: Arc<PreparedRowGroupLayoutCache>,
+    row_group_layouts: Arc<RowGroupLayoutCache>,
     context: Arc<TaskContext>,
 }
 
@@ -433,7 +455,7 @@ impl BloomTransferEngine {
     pub(crate) fn new(
         config: BloomConfig,
         samples: Arc<PreparedSampleCache>,
-        row_group_layouts: Arc<PreparedRowGroupLayoutCache>,
+        row_group_layouts: Arc<RowGroupLayoutCache>,
     ) -> Self {
         Self {
             config,
@@ -465,6 +487,31 @@ impl BloomTransferEngine {
             }
             return Ok(formal_plan);
         }
+        if self.config.handoff_policy == HandoffPolicy::FullRows
+            && context.session_config().target_partitions() > 1
+            && context
+                .session_config()
+                .options()
+                .optimizer
+                .enable_join_dynamic_filter_pushdown
+            && let Some(coverage) = native_join_filter_coverage(&formal_plan)
+            && coverage.collect_left.saturating_mul(3) >= coverage.join_count.saturating_mul(2)
+        {
+            // DataFusion's CollectLeft joins build a dynamic filter from the
+            // left input before scanning the right input. When native formal
+            // execution already covers most join boundaries that way, running
+            // every reduction table by table in transfer serializes largely
+            // duplicate work. Keep Bloom for scopes where Partitioned joins
+            // leave a substantial part of the graph uncovered. This is the
+            // DataFusion counterpart of Bloom's DuckDB left-deep guard.
+            if self.config.log_transfer_steps {
+                eprintln!(
+                    "[Bloom] scope skipped: native_join_filter_coverage collect_left={} joins={}",
+                    coverage.collect_left, coverage.join_count
+                );
+            }
+            return Ok(formal_plan);
+        }
         let Some(graph) = BloomGraph::build(&transfer_plan, &self.config)? else {
             return Ok(formal_plan);
         };
@@ -473,6 +520,7 @@ impl BloomTransferEngine {
             &graph,
             &self.config,
             Arc::clone(&self.samples),
+            Arc::clone(&self.row_group_layouts),
             Arc::clone(&context),
         )
         .await?;
@@ -502,6 +550,8 @@ impl BloomTransferEngine {
         let handoff_services = HandoffServices {
             policy: self.config.handoff_policy,
             parquet_membership_placement: self.config.parquet_membership_placement,
+            sampling_mode: self.config.sampling_mode,
+            instant_parquet_row_groups: self.config.instant_parquet_row_groups,
             log_steps: self.config.log_transfer_steps,
             row_group_layouts: Arc::clone(&self.row_group_layouts),
             context: Arc::clone(&context),
@@ -918,10 +968,12 @@ async fn initialize_tables(
     graph: &BloomGraph,
     config: &BloomConfig,
     samples: Arc<PreparedSampleCache>,
+    row_group_layouts: Arc<RowGroupLayoutCache>,
     context: Arc<TaskContext>,
 ) -> Result<Vec<TableRuntime>> {
     let jobs = graph.tables.iter().map(|table| {
         let samples = Arc::clone(&samples);
+        let row_group_layouts = Arc::clone(&row_group_layouts);
         let task_context = Arc::clone(&context);
         async move {
             let statistics_estimate = estimated_rows(&table.plan)?;
@@ -930,8 +982,16 @@ async fn initialize_tables(
                 .unwrap_or(0);
             let mut sample = None;
             let initial_estimate = if contains_local_filter(&table.plan) {
-                if let Some(sampled) =
-                    sample_table(table, config.sample_rows, &samples, task_context).await?
+                if let Some(sampled) = sample_table(
+                    table,
+                    config.sample_rows,
+                    config.sampling_mode,
+                    config.instant_parquet_row_groups,
+                    &samples,
+                    &row_group_layouts,
+                    task_context,
+                )
+                .await?
                 {
                     let estimate = if sampled.input_rows == 0 {
                         statistics_estimate.unwrap_or(base_estimate) as f64
@@ -1271,8 +1331,16 @@ async fn estimate_destination(
     }
 
     if runtime.sample.is_none() {
-        if let Some(sampled) =
-            sample_table(table, sample_rows, samples, Arc::clone(&services.context)).await?
+        if let Some(sampled) = sample_table(
+            table,
+            sample_rows,
+            services.sampling_mode,
+            services.instant_parquet_row_groups,
+            samples,
+            &services.row_group_layouts,
+            Arc::clone(&services.context),
+        )
+        .await?
         {
             runtime.sample = Some(sampled.partitions);
         } else if table.repeatable {
@@ -1463,6 +1531,49 @@ fn source_rows(plan: &Arc<dyn ExecutionPlan>) -> Result<Option<usize>> {
     Ok(Some(total))
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct NativeJoinFilterCoverage {
+    join_count: usize,
+    collect_left: usize,
+}
+
+/// Count the inner hash-join boundaries for which DataFusion's formal plan
+/// already supplies a build-to-probe dynamic filter.
+fn native_join_filter_coverage(plan: &Arc<dyn ExecutionPlan>) -> Option<NativeJoinFilterCoverage> {
+    let mut coverage = NativeJoinFilterCoverage::default();
+    if !collect_join_filter_coverage(plan, &mut coverage) || coverage.join_count == 0 {
+        return None;
+    }
+    Some(coverage)
+}
+
+fn collect_join_filter_coverage(
+    plan: &Arc<dyn ExecutionPlan>,
+    coverage: &mut NativeJoinFilterCoverage,
+) -> bool {
+    if let Some(join) = plan.downcast_ref::<HashJoinExec>() {
+        if join.join_type() != &datafusion::logical_expr::JoinType::Inner {
+            return false;
+        }
+        coverage.join_count += 1;
+        if join.partition_mode() == &PartitionMode::CollectLeft {
+            coverage.collect_left += 1;
+        }
+    } else if plan.downcast_ref::<CrossJoinExec>().is_some()
+        || plan.downcast_ref::<NestedLoopJoinExec>().is_some()
+        || plan.downcast_ref::<PiecewiseMergeJoinExec>().is_some()
+        || plan.downcast_ref::<SortMergeJoinExec>().is_some()
+        || plan.downcast_ref::<SymmetricHashJoinExec>().is_some()
+    {
+        // A coverage ratio over only the hash joins is not representative when
+        // the formal plan contains another join implementation.
+        return false;
+    }
+    plan.children()
+        .into_iter()
+        .all(|child| collect_join_filter_coverage(child, coverage))
+}
+
 fn contains_scalar_subquery(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.downcast_ref::<ScalarSubqueryExec>().is_some()
         || plan.children().into_iter().any(contains_scalar_subquery)
@@ -1524,19 +1635,76 @@ mod tests {
     use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, StringViewArray};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::common::ScalarValue;
-    use datafusion::logical_expr::Operator;
+    use datafusion::common::{NullEquality, ScalarValue};
+    use datafusion::logical_expr::{JoinType, Operator};
     use datafusion::physical_expr::PhysicalExpr;
     use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::physical_plan::joins::{CrossJoinExec, HashJoinExec, PartitionMode};
 
     use super::handoff::predicate_is_expensive;
+    use super::policy::{MaterializationFacts, MaterializationStrategy, choose_materialization};
     use super::sampling::localize_range;
     use super::{
-        compact_materialized_partition, compact_materialized_partitions, observed_handoff_widths,
-        partition_physical_bytes,
+        MaterializedPartitionBuilder, compact_materialized_partition, native_join_filter_coverage,
+        observed_handoff_widths, partition_physical_bytes,
     };
     use crate::config::HandoffPolicy;
-    use crate::handoff::{MaterializationFacts, MaterializationStrategy, choose_materialization};
+
+    #[test]
+    fn native_join_filter_coverage_counts_collect_left_boundaries() {
+        fn leaf() -> Arc<dyn ExecutionPlan> {
+            Arc::new(EmptyExec::new(Arc::new(Schema::new(vec![Field::new(
+                "id",
+                DataType::Int64,
+                false,
+            )]))))
+        }
+
+        fn join(
+            left: Arc<dyn ExecutionPlan>,
+            right: Arc<dyn ExecutionPlan>,
+            mode: PartitionMode,
+        ) -> Arc<dyn ExecutionPlan> {
+            Arc::new(
+                HashJoinExec::try_new(
+                    left,
+                    right,
+                    vec![(
+                        Arc::new(Column::new("id", 0)) as Arc<dyn PhysicalExpr>,
+                        Arc::new(Column::new("id", 0)) as Arc<dyn PhysicalExpr>,
+                    )],
+                    None,
+                    &JoinType::Inner,
+                    None,
+                    mode,
+                    NullEquality::NullEqualsNothing,
+                    false,
+                )
+                .unwrap(),
+            )
+        }
+
+        let covered = join(leaf(), leaf(), PartitionMode::CollectLeft);
+        let mixed = join(covered, leaf(), PartitionMode::Partitioned);
+        let covered = join(mixed, leaf(), PartitionMode::CollectLeft);
+        let plan = join(covered, leaf(), PartitionMode::CollectLeft);
+        let coverage = native_join_filter_coverage(&plan).unwrap();
+        assert_eq!(coverage.join_count, 4);
+        assert_eq!(coverage.collect_left, 3);
+        assert!(
+            coverage.collect_left * 3 >= coverage.join_count * 2,
+            "three of four boundaries should satisfy the parallel guard"
+        );
+
+        let mixed_kind = Arc::new(CrossJoinExec::new(plan, leaf())) as Arc<dyn ExecutionPlan>;
+        assert_eq!(
+            native_join_filter_coverage(&mixed_kind),
+            None,
+            "non-hash joins make native dynamic-filter coverage incomplete"
+        );
+    }
 
     #[test]
     fn global_sample_ranges_are_only_localized_after_intersection() {
@@ -1614,9 +1782,9 @@ mod tests {
             .slice(17, 1);
         let before = partition_physical_bytes(&[vec![batch.clone()]]);
 
-        let compacted = compact_materialized_partitions(vec![vec![batch]], 65_536).unwrap();
-        let after = partition_physical_bytes(&compacted);
-        let payload = compacted[0][0]
+        let compacted = compact_materialized_partition(vec![batch], 65_536).unwrap();
+        let after = partition_physical_bytes(std::slice::from_ref(&compacted));
+        let payload = compacted[0]
             .column(0)
             .as_any()
             .downcast_ref::<StringViewArray>()
@@ -1637,8 +1805,12 @@ mod tests {
             .unwrap()
         };
 
-        let compacted =
-            compact_materialized_partition(vec![make_batch(0), make_batch(5_000)], 8_192).unwrap();
+        let mut builder = MaterializedPartitionBuilder::new(8_192);
+        assert!(builder.push(make_batch(0)).unwrap().is_empty());
+        assert!(builder.buffered_physical_bytes() > 0);
+        let mut compacted = builder.push(make_batch(5_000)).unwrap();
+        assert_eq!(compacted.len(), 1, "a full batch must stream out early");
+        compacted.extend(builder.finish().unwrap());
         assert_eq!(
             compacted
                 .iter()

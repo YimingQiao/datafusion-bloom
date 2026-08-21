@@ -1,3 +1,5 @@
+//! Arrow ownership and compaction at the FullRows handoff boundary.
+
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -10,7 +12,7 @@ use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 
-use crate::handoff::{estimated_projection_width, estimated_schema_width, estimated_type_width};
+use super::policy::{estimated_projection_width, estimated_schema_width, estimated_type_width};
 
 const MIN_COMPACTION_SAVINGS_BYTES: usize = 64 * 1024;
 
@@ -137,21 +139,6 @@ fn fallback_array_bytes(array: &ArrayRef, null_bytes: usize) -> usize {
         .saturating_add(null_bytes)
 }
 
-/// Convert reader-produced batches into collection-owned Arrow buffers.
-///
-/// This is the explicit Arrow counterpart of appending selected DuckDB chunks
-/// into a collection: rows are coalesced, sparse backing buffers are released,
-/// and byte-view arrays receive a fresh ownership boundary.
-pub(super) fn compact_materialized_partitions(
-    partitions: Vec<Vec<RecordBatch>>,
-    target_batch_rows: usize,
-) -> Result<Vec<Vec<RecordBatch>>> {
-    partitions
-        .into_iter()
-        .map(|partition| compact_materialized_partition(partition, target_batch_rows.max(1)))
-        .collect()
-}
-
 /// Repack one partition into stable batch-sized ownership units. Compaction is
 /// a materialization invariant, not merely a small-batch optimization.
 pub(super) fn compact_materialized_partition(
@@ -159,27 +146,80 @@ pub(super) fn compact_materialized_partition(
     target_batch_rows: usize,
 ) -> Result<Vec<RecordBatch>> {
     let mut output = Vec::with_capacity(partition.len());
-    let mut pending = Vec::new();
-    let mut pending_rows = 0_usize;
-
-    for batch in partition.into_iter().filter(|batch| batch.num_rows() > 0) {
-        let mut offset = 0;
-        while offset < batch.num_rows() {
-            let available = target_batch_rows - pending_rows;
-            let length = available.min(batch.num_rows() - offset);
-            pending.push(batch.slice(offset, length));
-            pending_rows += length;
-            offset += length;
-            if pending_rows == target_batch_rows {
-                output.push(compact_batch_group(std::mem::take(&mut pending))?);
-                pending_rows = 0;
-            }
-        }
+    let mut builder = MaterializedPartitionBuilder::new(target_batch_rows);
+    for batch in partition {
+        output.extend(builder.push(batch)?);
     }
-    if !pending.is_empty() {
-        output.push(compact_batch_group(pending)?);
+    if let Some(batch) = builder.finish()? {
+        output.push(batch);
     }
     Ok(output)
+}
+
+/// Incrementally builds one owned handoff partition from reader batches.
+///
+/// At most one target-sized group of reader-owned slices remains buffered.
+/// Complete groups cross the compaction boundary immediately, allowing the
+/// caller to retain and account for each owned batch before polling the scan
+/// stream again.
+pub(super) struct MaterializedPartitionBuilder {
+    target_batch_rows: usize,
+    pending: Vec<RecordBatch>,
+    pending_rows: usize,
+    pending_physical_bytes: usize,
+}
+
+impl MaterializedPartitionBuilder {
+    pub(super) fn new(target_batch_rows: usize) -> Self {
+        Self {
+            target_batch_rows: target_batch_rows.max(1),
+            pending: Vec::new(),
+            pending_rows: 0,
+            pending_physical_bytes: 0,
+        }
+    }
+
+    /// Return a conservative measure of reader-owned buffers still retained
+    /// while waiting to fill the current output batch.
+    pub(super) fn buffered_physical_bytes(&self) -> usize {
+        self.pending_physical_bytes
+    }
+
+    /// Add a reader batch and emit every newly completed owned batch.
+    pub(super) fn push(&mut self, batch: RecordBatch) -> Result<Vec<RecordBatch>> {
+        if batch.num_rows() == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut output = Vec::new();
+        let mut offset = 0;
+        while offset < batch.num_rows() {
+            let available = self.target_batch_rows - self.pending_rows;
+            let length = available.min(batch.num_rows() - offset);
+            let slice = batch.slice(offset, length);
+            self.pending_physical_bytes = self
+                .pending_physical_bytes
+                .saturating_add(batch_physical_bytes(&slice));
+            self.pending.push(slice);
+            self.pending_rows += length;
+            offset += length;
+            if self.pending_rows == self.target_batch_rows {
+                output.push(compact_batch_group(std::mem::take(&mut self.pending))?);
+                self.pending_rows = 0;
+                self.pending_physical_bytes = 0;
+            }
+        }
+        Ok(output)
+    }
+
+    /// Flush the final partial batch at end of stream.
+    pub(super) fn finish(self) -> Result<Option<RecordBatch>> {
+        if self.pending.is_empty() {
+            Ok(None)
+        } else {
+            compact_batch_group(self.pending).map(Some)
+        }
+    }
 }
 
 /// Reset physical ownership after selection: view arrays are garbage-collected
@@ -259,10 +299,14 @@ fn compact_batch_group(batches: Vec<RecordBatch>) -> Result<RecordBatch> {
 /// Compute the memory-pool charge for the owned representation, as opposed to
 /// the logical live-byte estimate used by the handoff cost model.
 pub(super) fn partition_physical_bytes(partitions: &[Vec<RecordBatch>]) -> usize {
-    partitions
+    partitions.iter().flatten().map(batch_physical_bytes).sum()
+}
+
+/// Compute the memory-pool charge for one owned record batch.
+pub(super) fn batch_physical_bytes(batch: &RecordBatch) -> usize {
+    batch
+        .columns()
         .iter()
-        .flatten()
-        .flat_map(RecordBatch::columns)
         .map(|array| array.get_array_memory_size())
         .sum()
 }

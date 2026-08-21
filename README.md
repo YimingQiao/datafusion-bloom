@@ -159,12 +159,23 @@ let config = BloomConfig::default()
     .with_row_locations();
 ```
 
+Prepared sampling is the default for a long-lived session. An ad-hoc service
+can instead use query-local projected samples that are released after planning:
+
+```rust
+let config = BloomConfig::default()
+    .with_all_bounded_sources()
+    .with_instant_sampling();
+```
+
 The main configuration fields are:
 
 | Field | Default | Purpose |
 |---|---:|---|
 | `enabled` | `true` | Enable or bypass Bloom planning |
-| `sample_rows` | `10_000` | Prepared sample rows per immutable source |
+| `sample_rows` | `10_000` | Target sample rows per immutable source |
+| `sampling_mode` | `Prepared` | Reusable source samples or query-local `Instant` samples |
+| `instant_parquet_row_groups` | `8` | Row-group budget for an Instant Parquet sample |
 | `false_positive_rate` | `0.01` | Target for temporary probabilistic membership |
 | `max_transfer_rounds` | `64` | Fixed-point safety bound |
 | `excitation_threshold` | `1.0` | Cardinality fraction that reactivates a source |
@@ -181,6 +192,11 @@ DataFusion's memory pool. If transfer cannot obtain or grow that reservation,
 Bloom discards its temporary state and leaves the query on the native plan.
 Prepared samples are single-flight across concurrent queries and retained in a
 bounded session cache.
+
+The workload runner accepts `--instant-sampling`. The one-command suite exposes
+the same choice as `BLOOM_BENCH_SAMPLING=instant`; optionally set
+`BLOOM_BENCH_INSTANT_ROW_GROUPS`. Its environment record and benchmark header
+identify the selected mode.
 
 ## Correctness
 

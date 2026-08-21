@@ -10,16 +10,14 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 
 use crate::compat::{is_recoverable_transfer_error, is_resource_exhausted};
 use crate::config::BloomConfig;
-use crate::late_materialization::PreparedRowGroupLayoutCache;
-use crate::samples::PreparedSampleCache;
-use crate::transfer::BloomTransferEngine;
+use crate::transfer::{BloomTransferEngine, PreparedSampleCache, RowGroupLayoutCache};
 
 /// DataFusion query planner that inserts Bloom's transfer phase between P0 and P1.
 #[derive(Debug, Clone)]
 pub struct BloomQueryPlanner {
     config: BloomConfig,
     samples: Arc<PreparedSampleCache>,
-    row_group_layouts: Arc<PreparedRowGroupLayoutCache>,
+    row_group_layouts: Arc<RowGroupLayoutCache>,
 }
 
 impl BloomQueryPlanner {
@@ -30,7 +28,7 @@ impl BloomQueryPlanner {
         Ok(Self {
             config,
             samples: Arc::new(PreparedSampleCache::default()),
-            row_group_layouts: Arc::new(PreparedRowGroupLayoutCache::default()),
+            row_group_layouts: Arc::new(RowGroupLayoutCache::default()),
         })
     }
 

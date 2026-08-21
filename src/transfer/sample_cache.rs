@@ -1,3 +1,5 @@
+//! Session-scoped storage for reusable prepared samples.
+
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Mutex};

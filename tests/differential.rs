@@ -7,7 +7,7 @@ use datafusion::common::Result;
 use datafusion::common::test_util::batches_to_sort_string;
 use datafusion::datasource::MemTable;
 use datafusion::execution::SessionStateBuilder;
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bloom::{BloomConfig, install_bloom};
 
 const QUERY: &str = "\
@@ -71,7 +71,11 @@ fn make_partitions(seed: u64, payload_base: i64) -> Result<Vec<Vec<RecordBatch>>
 }
 
 fn context(bloom: bool) -> Result<SessionContext> {
-    let state = SessionStateBuilder::new_with_default_features().build();
+    // Exercise the Bloom execution path rather than its parallel native-filter
+    // bypass; the baseline uses the same physical parallelism.
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
+        .build();
     let state = if bloom {
         install_bloom(
             state,

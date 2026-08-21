@@ -10,7 +10,7 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bloom::{BloomConfig, BloomQueryPlanner, install_bloom};
 
 fn context_with_bloom() -> Result<SessionContext> {
@@ -21,7 +21,9 @@ fn context_with_bloom() -> Result<SessionContext> {
 }
 
 fn context_with_config(config: BloomConfig) -> Result<SessionContext> {
-    let state = SessionStateBuilder::new_with_default_features().build();
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
+        .build();
     let state = install_bloom(state, config)?;
     Ok(SessionContext::new_with_state(state))
 }
@@ -34,6 +36,7 @@ fn context_with_memory_limit(bytes: usize) -> Result<(SessionContext, Arc<Greedy
             .build()?,
     );
     let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
         .with_runtime_env(runtime)
         .build();
     let state = install_bloom(
@@ -354,4 +357,11 @@ fn invalid_config_is_rejected() {
     })
     .expect_err("an invalid false-positive rate must be rejected");
     assert!(error.to_string().contains("false_positive_rate"));
+
+    let error = BloomQueryPlanner::new(BloomConfig {
+        instant_parquet_row_groups: 0,
+        ..BloomConfig::default()
+    })
+    .expect_err("a zero instant row-group budget must be rejected");
+    assert!(error.to_string().contains("instant_parquet_row_groups"));
 }

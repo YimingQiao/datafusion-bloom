@@ -33,7 +33,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_datasource::PartitionedFile;
 
-use crate::handoff::RowLocationLocality;
+use super::policy::RowLocationLocality;
 use futures::StreamExt;
 
 pub(crate) const FILE_ID_COLUMN: &str = "__bloom_file_id";
@@ -60,15 +60,15 @@ pub(crate) struct PreparedLocationPlan {
 /// locations need this metadata for every query, but reading all file footers
 /// again is pure setup overhead.
 #[derive(Debug, Default)]
-pub(crate) struct PreparedRowGroupLayoutCache {
+pub(crate) struct RowGroupLayoutCache {
     entries: Mutex<HashMap<String, Arc<Vec<usize>>>>,
 }
 
-impl PreparedRowGroupLayoutCache {
+impl RowGroupLayoutCache {
     /// Cache immutable row-group lengths under source snapshot identity. They
     /// translate global offsets into reader selections but carry no query
     /// predicate state.
-    fn row_group_rows(&self, file: &PartitionedFile) -> Result<Arc<Vec<usize>>> {
+    pub(crate) fn row_group_rows(&self, file: &PartitionedFile) -> Result<Arc<Vec<usize>>> {
         let key = format!(
             "{}|{}|{:?}|{:?}|{:?}",
             file.object_meta.location,
@@ -114,7 +114,7 @@ impl PreparedRowGroupLayoutCache {
 pub(crate) fn try_prepare_location_plan(
     plan: Arc<dyn ExecutionPlan>,
     log_fallback: bool,
-    layouts: &PreparedRowGroupLayoutCache,
+    layouts: &RowGroupLayoutCache,
 ) -> Result<Option<PreparedLocationPlan>> {
     let mut paths = vec![];
     collect_source_paths(&plan, &mut vec![], &mut paths);

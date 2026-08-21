@@ -14,7 +14,7 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
-use datafusion::prelude::{ParquetReadOptions, SessionContext};
+use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion_bloom::{BloomConfig, install_bloom};
 use tempfile::TempDir;
 
@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
     let row_ms = median_ms(&row_runs);
     println!("wide selective Parquet handoff benchmark");
     println!("rows={ROWS} payload_columns=8 selected_rows=1 runs={RUNS}");
+    println!("target_partitions=64 join_dynamic_filters=false batch_size=8192");
     println!("mode\tmedian_ms\tvs_datafusion\tvs_full_rows\tfull_rows\trow_locations");
     println!(
         "DataFusion\t{baseline_ms:.3}\t1.000x\t{:.3}x\t0\t0",
@@ -118,7 +119,17 @@ async fn main() -> Result<()> {
 }
 
 async fn make_context(path: &Path, bloom: Option<BloomConfig>) -> Result<SessionContext> {
-    let mut state = SessionStateBuilder::new_with_default_features().build();
+    // This benchmark isolates handoff representation rather than DataFusion's
+    // native dynamic-filter coverage guard. Disable that native predicate for
+    // every mode so FullRows and RowLocations execute the same transfer graph.
+    let mut state_config = SessionConfig::new().with_target_partitions(64);
+    state_config
+        .options_mut()
+        .optimizer
+        .enable_join_dynamic_filter_pushdown = false;
+    let mut state = SessionStateBuilder::new_with_default_features()
+        .with_config(state_config)
+        .build();
     if let Some(config) = bloom {
         state = install_bloom(state, config)?;
     }

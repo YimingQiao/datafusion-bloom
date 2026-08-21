@@ -23,6 +23,17 @@ pub enum ParquetMembershipPlacement {
     PostScan,
 }
 
+/// Lifetime and physical shape of base-table samples used for transfer estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplingMode {
+    /// Build one query-independent source sample and reuse it across plans in
+    /// the same session.
+    Prepared,
+    /// Read a query-local sample through the current source projection and
+    /// predicate, then release it when planning finishes.
+    Instant,
+}
+
 /// Configuration for the Bloom transfer planner.
 #[derive(Debug, Clone)]
 pub struct BloomConfig {
@@ -54,6 +65,10 @@ pub struct BloomConfig {
     pub max_transfer_rounds: usize,
     /// Target number of post-local-filter rows retained per table sample.
     pub sample_rows: usize,
+    /// Choose reusable source samples or query-local projected samples.
+    pub sampling_mode: SamplingMode,
+    /// Maximum Parquet row groups read by one instant sample.
+    pub instant_parquet_row_groups: usize,
     /// Reactivate a table when its estimated cardinality falls below this
     /// fraction of the last committed baseline.
     pub excitation_threshold: f64,
@@ -71,6 +86,8 @@ impl Default for BloomConfig {
             parquet_membership_placement: ParquetMembershipPlacement::Reader,
             max_transfer_rounds: 64,
             sample_rows: 10_000,
+            sampling_mode: SamplingMode::Prepared,
+            instant_parquet_row_groups: 8,
             excitation_threshold: 1.0,
         }
     }
@@ -111,6 +128,20 @@ impl BloomConfig {
         self
     }
 
+    /// Use query-local samples that preserve the current Parquet projection
+    /// and predicate, without populating the prepared-sample cache.
+    pub fn with_instant_sampling(mut self) -> Self {
+        self.sampling_mode = SamplingMode::Instant;
+        self
+    }
+
+    /// Bound the number of stratified Parquet row groups used by each instant
+    /// sample. Each selected group contributes one contiguous row window.
+    pub fn with_instant_parquet_row_groups(mut self, row_groups: usize) -> Self {
+        self.instant_parquet_row_groups = row_groups;
+        self
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if !(0.0..1.0).contains(&self.false_positive_rate) {
             return plan_err!("Bloom false_positive_rate must be greater than 0 and less than 1");
@@ -120,6 +151,9 @@ impl BloomConfig {
         }
         if self.sample_rows == 0 {
             return plan_err!("Bloom sample_rows must be greater than 0");
+        }
+        if self.instant_parquet_row_groups == 0 {
+            return plan_err!("Bloom instant_parquet_row_groups must be greater than 0");
         }
         if !self.excitation_threshold.is_finite() || self.excitation_threshold <= 0.0 {
             return plan_err!("Bloom excitation_threshold must be finite and greater than 0");

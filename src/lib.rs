@@ -10,14 +10,10 @@ mod compat;
 mod config;
 mod filter;
 mod graph;
-mod handoff;
-mod late_materialization;
 mod lineage;
-mod materialization;
 mod planner;
-mod samples;
 mod transfer;
 
 pub use collection::BloomCollection;
-pub use config::{BloomConfig, HandoffPolicy, ParquetMembershipPlacement};
+pub use config::{BloomConfig, HandoffPolicy, ParquetMembershipPlacement, SamplingMode};
 pub use planner::{BloomQueryPlanner, install_bloom};

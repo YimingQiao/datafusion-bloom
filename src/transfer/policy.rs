@@ -1,3 +1,5 @@
+//! Physical handoff policy, deliberately independent from propagation.
+
 use datafusion::arrow::datatypes::{DataType, Schema};
 
 use crate::config::HandoffPolicy;

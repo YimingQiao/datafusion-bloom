@@ -116,6 +116,8 @@ struct Options {
     baseline_only: bool,
     bloom_only: bool,
     row_locations: bool,
+    instant_sampling: bool,
+    instant_parquet_row_groups: usize,
     log_transfer: bool,
     fresh_context_per_query: bool,
     parquet_pushdown: bool,
@@ -147,6 +149,8 @@ impl Options {
         let mut baseline_only = false;
         let mut bloom_only = false;
         let mut row_locations = false;
+        let mut instant_sampling = false;
+        let mut instant_parquet_row_groups = 8;
         let mut log_transfer = false;
         let mut fresh_context_per_query = false;
         let mut parquet_pushdown = false;
@@ -169,6 +173,10 @@ impl Options {
                 "--baseline-only" => baseline_only = true,
                 "--bloom-only" => bloom_only = true,
                 "--row-locations" => row_locations = true,
+                "--instant-sampling" => instant_sampling = true,
+                "--instant-parquet-row-groups" => {
+                    instant_parquet_row_groups = parse(&flag, &next_value(&mut arguments, &flag))
+                }
                 "--log-transfer" => log_transfer = true,
                 "--fresh-context-per-query" => fresh_context_per_query = true,
                 "--parquet-pushdown" => parquet_pushdown = true,
@@ -279,6 +287,8 @@ impl Options {
             baseline_only,
             bloom_only,
             row_locations,
+            instant_sampling,
+            instant_parquet_row_groups,
             log_transfer,
             fresh_context_per_query,
             parquet_pushdown,
@@ -436,7 +446,7 @@ async fn run(options: Options) -> Result<()> {
         options.workload.name().to_uppercase()
     );
     println!(
-        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} scale_factor={} row_locations={} reoptimize={} parquet_pushdown={} predicate_cache_size={:?} membership={} context={}",
+        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} scale_factor={} row_locations={} sampling={} instant_parquet_row_groups={} reoptimize={} parquet_pushdown={} predicate_cache_size={:?} membership={} context={}",
         options.data_dir.display(),
         source_name(&options),
         options.query_dir.display(),
@@ -449,6 +459,8 @@ async fn run(options: Options) -> Result<()> {
         options.runs,
         options.scale_factor,
         options.row_locations,
+        sampling_mode_name(&options),
+        options.instant_parquet_row_groups,
         options.reoptimize,
         options.parquet_pushdown,
         options.predicate_cache_size,
@@ -658,7 +670,7 @@ async fn run_bloom_only(
         options.workload.name().to_uppercase()
     );
     println!(
-        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} reoptimize={} predicate_cache_size={:?} membership={} context={}",
+        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} sampling={} instant_parquet_row_groups={} reoptimize={} predicate_cache_size={:?} membership={} context={}",
         options.data_dir.display(),
         source_name(options),
         options.query_dir.display(),
@@ -669,6 +681,8 @@ async fn run_bloom_only(
         options.excitation_threshold,
         options.warmups,
         options.runs,
+        sampling_mode_name(options),
+        options.instant_parquet_row_groups,
         options.reoptimize,
         options.predicate_cache_size,
         if options.post_scan_membership {
@@ -944,6 +958,11 @@ async fn make_context(
         bloom_config.reoptimize = options.reoptimize;
         if options.row_locations {
             bloom_config = bloom_config.with_row_locations();
+        }
+        if options.instant_sampling {
+            bloom_config = bloom_config
+                .with_instant_sampling()
+                .with_instant_parquet_row_groups(options.instant_parquet_row_groups);
         }
         if options.post_scan_membership {
             bloom_config = bloom_config.with_post_scan_membership();
@@ -1376,6 +1395,14 @@ fn string_type_name(options: &Options) -> &'static str {
     }
 }
 
+fn sampling_mode_name(options: &Options) -> &'static str {
+    if options.instant_sampling {
+        "instant"
+    } else {
+        "prepared"
+    }
+}
+
 fn print_help() {
     println!(
         "Usage: cargo bench --bench workload -- [OPTIONS]\n\
@@ -1393,6 +1420,8 @@ fn print_help() {
          --warmups N               Untimed pairs per query (default: 1)\n\
          --runs N                  Timed pairs per query (default: 5)\n\
          --row-locations           Enable experimental cost-based row-location handoffs\n\
+         --instant-sampling        Use query-local projected samples instead of the cache\n\
+         --instant-parquet-row-groups N  Row groups per instant Parquet sample (default: 8)\n\
          --fresh-context-per-query Do not reuse Bloom samples across different queries\n\
          --parquet-pushdown        Enable Parquet late-materialized filter pushdown\n\
          --post-scan-membership    Evaluate Bloom membership after Parquet decoding\n\

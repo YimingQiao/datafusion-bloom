@@ -12,6 +12,8 @@ use datafusion::datasource::physical_plan::parquet::ParquetAccessPlan;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionConfig;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
@@ -73,6 +75,141 @@ fn count_row_selected_sources(plan: &Arc<dyn ExecutionPlan>) -> usize {
             .into_iter()
             .map(count_row_selected_sources)
             .sum::<usize>()
+}
+
+#[tokio::test]
+async fn instant_sampling_preserves_query_local_parquet_semantics() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let left_path = write_table(
+        &directory,
+        "instant_left.parquet",
+        "left_value",
+        vec![1, 2, 3, 4],
+        vec!["drop", "keep", "keep", "drop"],
+    )?;
+    let right_path = write_table(
+        &directory,
+        "instant_right.parquet",
+        "right_value",
+        vec![2, 3, 5],
+        vec!["r2", "r3", "r5"],
+    )?;
+
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
+        .build();
+    let state = install_bloom(
+        state,
+        BloomConfig {
+            excitation_threshold: 1.01,
+            ..BloomConfig::default()
+        }
+        .with_all_bounded_sources()
+        .with_instant_sampling(),
+    )?;
+    let context = SessionContext::new_with_state(state);
+    context
+        .register_parquet("left_table", &left_path, ParquetReadOptions::default())
+        .await?;
+    context
+        .register_parquet("right_table", &right_path, ParquetReadOptions::default())
+        .await?;
+
+    let batches = context
+        .sql(
+            "SELECT l.id, r.right_value \
+             FROM left_table l JOIN right_table r ON l.id = r.id \
+             WHERE l.left_value = 'keep'",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches_to_sort_string(&batches),
+        [
+            "+----+-------------+",
+            "| id | right_value |",
+            "+----+-------------+",
+            "| 2  | r2          |",
+            "| 3  | r3          |",
+            "+----+-------------+",
+        ]
+        .join("\n")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn instant_sampling_does_not_retain_a_session_sample() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let left_path = write_table(
+        &directory,
+        "sample_lifetime_left.parquet",
+        "left_value",
+        (0..20_000).collect(),
+        (0..20_000)
+            .map(|id| if id % 2 == 0 { "keep" } else { "drop" })
+            .collect(),
+    )?;
+    let right_path = write_table(
+        &directory,
+        "sample_lifetime_right.parquet",
+        "right_value",
+        (0..20_000).collect(),
+        vec!["right"; 20_000],
+    )?;
+    let query = "SELECT count(*) FROM left_table l JOIN right_table r ON l.id = r.id \
+                 WHERE l.left_value = 'keep'";
+
+    let make_context = |instant| -> Result<(SessionContext, Arc<GreedyMemoryPool>)> {
+        let pool = Arc::new(GreedyMemoryPool::new(64 * 1024 * 1024));
+        let runtime = Arc::new(
+            RuntimeEnvBuilder::new()
+                .with_memory_pool(Arc::clone(&pool) as Arc<dyn MemoryPool>)
+                .build()?,
+        );
+        let state = SessionStateBuilder::new_with_default_features()
+            .with_config(SessionConfig::new().with_target_partitions(1))
+            .with_runtime_env(runtime)
+            .build();
+        let mut config = BloomConfig {
+            excitation_threshold: 1.01,
+            ..BloomConfig::default()
+        }
+        .with_all_bounded_sources();
+        if instant {
+            config = config.with_instant_sampling();
+        }
+        let state = install_bloom(state, config)?;
+        Ok((SessionContext::new_with_state(state), pool))
+    };
+
+    let (prepared, prepared_pool) = make_context(false)?;
+    let (instant, instant_pool) = make_context(true)?;
+    for context in [&prepared, &instant] {
+        context
+            .register_parquet("left_table", &left_path, ParquetReadOptions::default())
+            .await?;
+        context
+            .register_parquet("right_table", &right_path, ParquetReadOptions::default())
+            .await?;
+    }
+
+    let prepared_plan = prepared.sql(query).await?.create_physical_plan().await?;
+    drop(prepared_plan);
+    assert!(
+        prepared_pool.reserved() > 0,
+        "prepared mode should retain its reusable source sample"
+    );
+
+    let instant_plan = instant.sql(query).await?.create_physical_plan().await?;
+    drop(instant_plan);
+    assert_eq!(
+        instant_pool.reserved(),
+        0,
+        "instant mode should release its query-local sample with the plan"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -160,7 +297,9 @@ async fn row_location_mode_keeps_narrow_materializations_as_full_rows() -> Resul
         vec!["r3", "r4", "r5"],
     )?;
 
-    let state = SessionStateBuilder::new_with_default_features().build();
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
+        .build();
     let config = BloomConfig {
         excitation_threshold: 1.01,
         ..BloomConfig::default()
@@ -390,7 +529,9 @@ async fn default_path_materializes_all_query_columns() -> Result<()> {
         vec!["r3", "r4", "r5"],
     )?;
 
-    let state = SessionStateBuilder::new_with_default_features().build();
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
+        .build();
     let config = BloomConfig {
         excitation_threshold: 1.01,
         ..BloomConfig::default()

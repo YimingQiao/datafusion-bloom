@@ -8,11 +8,15 @@ use datafusion::common::test_util::batches_to_sort_string;
 use datafusion::datasource::MemTable;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bloom::{BloomConfig, install_bloom};
 
 fn context_with_bloom() -> Result<SessionContext> {
-    let state = SessionStateBuilder::new_with_default_features().build();
+    // Keep this as an extension-path test. Parallel plans whose native dynamic
+    // filters already cover the join graph may intentionally bypass Bloom.
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(1))
+        .build();
     let state = install_bloom(
         state,
         BloomConfig {
