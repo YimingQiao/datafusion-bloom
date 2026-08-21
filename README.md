@@ -85,6 +85,33 @@ gives:
 | STATS-CEB | 12.9 MB, compressed | 146 | 182.136 s | 54.444 s | **3.345×** |
 | TPC-H SF10 | 2.47 GB, compressed | 22 | 18.803 s | 13.636 s | **1.379×** |
 
+Both sides run sequentially on the same eight-worker Tokio runtime with
+`target_partitions=8`; Bloom does not create an additional executor or change
+the native batch size. Its relative gain grows because transfer scans and
+FullRows compaction now use those physical partitions, while the reduced
+handoffs leave less hash-table, fanout, and memory-bandwidth work for the
+unchanged DataFusion joins.
+
+STATS-CEB's total is dominated by three high-fanout joins where native
+DataFusion's multi-partition runtime filters arrive after some probe scans have
+already started. The join order is unchanged, but much larger inputs pass into
+the exact joins:
+
+| Query | DataFusion, 1 thread | DataFusion, 8 threads | Largest join intermediate, 1 → 8 threads |
+|---|---:|---:|---:|
+| 32 | 0.178 s | 59.923 s | 19.40 M → 52.99 B rows |
+| 48 | 0.027 s | 29.340 s | 224 → 21.96 B rows |
+| 49 | 0.153 s | 45.430 s | 18.60 M → 27.90 B rows |
+
+DataFusion's dynamic filters begin as permissive placeholders and tighten as
+build inputs complete. With several scan and repartition tasks in flight, rows
+that passed an earlier filter generation are not revisited. These queries join
+several fact tables on `UserId`, so the missed reduction compounds across
+many-to-many joins. Bloom completes transfer before formal execution and thus
+avoids this timing-dependent fanout. The STATS-CEB result is consequently a
+real avoidance of a DataFusion performance cliff; CEB and JOB show the broader
+parallel benefit across their workloads.
+
 All 3,527 Baseline/Bloom result pairs in each complete suite produced identical
 complete-output fingerprints. Both sides use the same files, filter pushdown,
 native 8,192-row batch size, and join dynamic filters. A prepared sample is

@@ -497,7 +497,7 @@ fn membership_work_groups(
             )
         })
         .collect::<Vec<_>>();
-    indexed.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    indexed.sort_unstable_by_key(|item| std::cmp::Reverse(item.0));
 
     let worker_count = worker_count.min(indexed.len()).max(1);
     let mut groups = vec![Vec::new(); worker_count];

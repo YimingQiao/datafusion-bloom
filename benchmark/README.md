@@ -87,7 +87,7 @@ BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3 \
 
 No run-script path changes DataFusion's batch size. Set
 `BLOOM_BENCH_THREADS` to change both the Tokio worker count and DataFusion
-target partitions; the release table uses one.
+target partitions; the README reports complete one- and eight-thread tables.
 
 ## CEB IMDB provenance
 
@@ -196,6 +196,19 @@ benchmark/scripts/prepare-stats-ceb.sh
 cargo bench --bench workload -- \
   --workload stats-ceb --threads 1 --warmups 1 --runs 3 \
   --parquet-pushdown
+```
+
+The native DataFusion runtime-filter sensitivity reported in the main README
+can be reproduced independently of Bloom. `--show-metrics` exposes scan and
+join row counts after the timed complete-output run:
+
+```bash
+cargo bench --bench workload -- \
+  --workload stats-ceb --queries 32,48,49 --threads 1 \
+  --warmups 0 --runs 1 --baseline-only --show-metrics --parquet-pushdown
+cargo bench --bench workload -- \
+  --workload stats-ceb --queries 32,48,49 --threads 8 \
+  --warmups 0 --runs 1 --baseline-only --show-metrics --parquet-pushdown
 ```
 
 ## Diagnostics
