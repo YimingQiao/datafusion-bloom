@@ -1,3 +1,5 @@
 /target/
 /benchmark_data/
 /benchmark_results/
+__pycache__/
+*.pyc

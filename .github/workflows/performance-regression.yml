@@ -1,0 +1,183 @@
+name: Performance Regression
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/performance-regression.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'benches/workload.rs'
+      - 'benchmark/job/queries/**'
+      - 'benchmark/tpch/queries/**'
+      - 'benchmark/scripts/compare_performance.py'
+      - 'benchmark/scripts/prepare-job.sh'
+      - 'benchmark/scripts/prepare-tpch.sh'
+      - 'benchmark/tests/test_compare_performance.py'
+      - 'examples/**'
+      - 'src/**'
+  pull_request:
+    paths:
+      - '.github/workflows/performance-regression.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'benches/workload.rs'
+      - 'benchmark/job/queries/**'
+      - 'benchmark/tpch/queries/**'
+      - 'benchmark/scripts/compare_performance.py'
+      - 'benchmark/scripts/prepare-job.sh'
+      - 'benchmark/scripts/prepare-tpch.sh'
+      - 'benchmark/tests/test_compare_performance.py'
+      - 'examples/**'
+      - 'src/**'
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Optional base commit or ref (defaults to the event base)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: JOB + TPC-H SF1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/performance
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: performance-regression
+
+      - name: Restore JOB Parquet data
+        id: job-data
+        uses: actions/cache@v5
+        with:
+          path: benchmark_data/job/parquet
+          key: datafusion-bloom-job-zstd3-v1-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Restore TPC-H SF1 Parquet data
+        id: tpch-data
+        uses: actions/cache@v5
+        with:
+          path: |
+            benchmark_data/tpch/sf1/parquet
+            benchmark_data/tools/tpchgen-3.0.0
+          key: datafusion-bloom-tpch-sf1-v1-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Prepare JOB data
+        if: steps.job-data.outputs.cache-hit != 'true'
+        env:
+          BLOOM_PREPARE_THREADS: '2'
+        run: benchmark/scripts/prepare-job.sh
+
+      - name: Prepare TPC-H SF1 data
+        if: steps.tpch-data.outputs.cache-hit != 'true'
+        env:
+          BLOOM_PREPARE_THREADS: '2'
+          BLOOM_TPCH_PARTS: '2'
+        run: benchmark/scripts/prepare-tpch.sh 1
+
+      - name: Resolve base commit
+        env:
+          DISPATCH_BASE: ${{ inputs.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DISPATCH_BASE}" ]]; then
+            base_ref="${DISPATCH_BASE}"
+          elif [[ "${EVENT_NAME}" == 'pull_request' ]]; then
+            base_ref="${PR_BASE}"
+          elif [[ "${EVENT_NAME}" == 'push' && ! "${PUSH_BASE}" =~ ^0+$ ]]; then
+            base_ref="${PUSH_BASE}"
+          else
+            base_ref='HEAD^'
+          fi
+          base_sha="$(git rev-parse --verify --end-of-options "${base_ref}^{commit}")"
+          echo "Comparing candidate $(git rev-parse HEAD) against base ${base_sha}"
+          echo "BASE_SHA=${base_sha}" >> "${GITHUB_ENV}"
+          echo "BASE_DIR=${RUNNER_TEMP}/datafusion-bloom-base" >> "${GITHUB_ENV}"
+          echo "BASE_RUNNER=${RUNNER_TEMP}/workload-base" >> "${GITHUB_ENV}"
+          echo "CANDIDATE_RUNNER=${RUNNER_TEMP}/workload-candidate" >> "${GITHUB_ENV}"
+          echo "RESULT_DIR=${RUNNER_TEMP}/performance-results" >> "${GITHUB_ENV}"
+
+      - name: Check out base worktree
+        run: git worktree add --detach "${BASE_DIR}" "${BASE_SHA}"
+
+      - name: Test performance comparison logic
+        run: python3 -m unittest discover --start-directory benchmark/tests
+
+      - name: Build candidate workload runner
+        run: |
+          set -euo pipefail
+          build_log="${RUNNER_TEMP}/candidate-build.json"
+          cargo build --locked --release --bench workload --message-format=json > "${build_log}"
+          executable="$(
+            jq -r '
+              select(.reason == "compiler-artifact" and
+                     .target.name == "workload" and
+                     .executable != null) |
+              .executable
+            ' "${build_log}" | tail -n 1
+          )"
+          test -n "${executable}"
+          install -m 755 "${executable}" "${CANDIDATE_RUNNER}"
+
+      - name: Build base workload runner
+        run: |
+          set -euo pipefail
+          build_log="${RUNNER_TEMP}/base-build.json"
+          cargo build \
+            --manifest-path "${BASE_DIR}/Cargo.toml" \
+            --locked \
+            --release \
+            --bench workload \
+            --message-format=json > "${build_log}"
+          executable="$(
+            jq -r '
+              select(.reason == "compiler-artifact" and
+                     .target.name == "workload" and
+                     .executable != null) |
+              .executable
+            ' "${build_log}" | tail -n 1
+          )"
+          test -n "${executable}"
+          install -m 755 "${executable}" "${BASE_RUNNER}"
+
+      - name: Compare Bloom versions and stock DataFusion
+        run: |
+          python3 benchmark/scripts/compare_performance.py \
+            --base-runner "${BASE_RUNNER}" \
+            --candidate-runner "${CANDIDATE_RUNNER}" \
+            --job-data-dir "${GITHUB_WORKSPACE}/benchmark_data/job/parquet" \
+            --tpch-data-dir "${GITHUB_WORKSPACE}/benchmark_data/tpch/sf1/parquet" \
+            --workload job \
+            --workload tpch_sf1 \
+            --out-dir "${RESULT_DIR}"
+
+      - name: Upload benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-regression-${{ github.run_id }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/performance-results
+          retention-days: 7
