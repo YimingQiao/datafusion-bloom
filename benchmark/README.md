@@ -198,19 +198,6 @@ cargo bench --bench workload -- \
   --parquet-pushdown
 ```
 
-The native DataFusion runtime-filter sensitivity reported in the main README
-can be reproduced independently of Bloom. `--show-metrics` exposes scan and
-join row counts after the timed complete-output run:
-
-```bash
-cargo bench --bench workload -- \
-  --workload stats-ceb --queries 32,48,49 --threads 1 \
-  --warmups 0 --runs 1 --baseline-only --show-metrics --parquet-pushdown
-cargo bench --bench workload -- \
-  --workload stats-ceb --queries 32,48,49 --threads 8 \
-  --warmups 0 --runs 1 --baseline-only --show-metrics --parquet-pushdown
-```
-
 ## Diagnostics
 
 `--log-transfer` prints table estimates, excitation rounds, policy decisions,
