@@ -501,21 +501,23 @@ impl BloomTransferEngine {
                     "missing Bloom materialization for filter source {source}"
                 ))
             })?;
-            let built = build_transfer_filters(
+            let (built, membership_workers) = build_transfer_filters(
                 handoff,
                 &build_specs,
                 &random_state,
                 self.config.false_positive_rate,
                 handoff_services.context.as_ref(),
-            )?;
+            )
+            .await?;
             if self.config.log_transfer_steps {
                 eprintln!(
-                    "  [build] distinct={} cache_hits={} elapsed_ms={:.3}",
+                    "  [build] distinct={} cache_hits={} workers={} elapsed_ms={:.3}",
                     build_specs.len(),
                     activations
                         .iter()
                         .filter(|activation| activation.filter.is_some())
                         .count(),
+                    membership_workers,
                     build_started.elapsed().as_secs_f64() * 1000.0
                 );
             }

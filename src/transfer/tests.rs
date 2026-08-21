@@ -3,7 +3,12 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, StringViewArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::hash_utils::RandomState;
 use datafusion::common::{NullEquality, ScalarValue};
+use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::context::{SessionConfig, SessionContext};
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{JoinType, Operator};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
@@ -15,10 +20,90 @@ use super::handoff::predicate_is_expensive;
 use super::policy::{MaterializationFacts, MaterializationStrategy, choose_materialization};
 use super::sampling::localize_range;
 use super::{
-    MaterializedPartitionBuilder, compact_materialized_partition, native_join_filter_coverage,
+    HandoffData, MaterializedPartitionBuilder, TransferHandoff, build_transfer_filters,
+    compact_materialized_partition, evaluate_hashes, native_join_filter_coverage,
     observed_handoff_widths, partition_physical_bytes,
 };
 use crate::config::HandoffPolicy;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn membership_build_parallelizes_and_falls_back_under_memory_pressure() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("group_id", DataType::Int64, false),
+    ]));
+    let rows_per_partition = 32 * 1024;
+    let partitions = (0..4)
+        .map(|partition| {
+            let start = partition * rows_per_partition;
+            let ids = Arc::new(Int64Array::from_iter_values(
+                (start..start + rows_per_partition).map(|value| value as i64),
+            )) as ArrayRef;
+            let groups = Arc::new(Int64Array::from_iter_values(
+                (0..rows_per_partition).map(|value| (value % 97) as i64),
+            )) as ArrayRef;
+            vec![RecordBatch::try_new(Arc::clone(&schema), vec![ids, groups]).unwrap()]
+        })
+        .collect::<Vec<_>>();
+    let row_count = rows_per_partition * partitions.len();
+    let source = TransferHandoff::FullRows(HandoffData {
+        partitions,
+        input_row_count: row_count,
+        row_count,
+        generation: 0,
+        reservation: None,
+    });
+    let keys = vec![vec![
+        Arc::new(Column::new("id", 0)) as Arc<dyn PhysicalExpr>,
+        Arc::new(Column::new("group_id", 1)) as Arc<dyn PhysicalExpr>,
+    ]];
+    let context =
+        SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4)).task_ctx();
+    let random_state = RandomState::with_seed(super::HASH_SEED);
+
+    let (filters, workers) =
+        build_transfer_filters(&source, &keys, &random_state, 0.01, context.as_ref())
+            .await
+            .unwrap();
+    assert_eq!(workers, 4);
+    for batch in source.partitions().iter().flatten() {
+        for hash in evaluate_hashes(batch, &keys[0], &random_state).unwrap() {
+            assert!(filters[0].might_contain(hash));
+        }
+    }
+    let filter_bytes = filters[0].allocated_bytes();
+    drop(filters);
+
+    // Admit the result but not a second worker-local copy, so parallel build
+    // must degrade to its serial path.
+    let pool = Arc::new(GreedyMemoryPool::new(
+        filter_bytes.saturating_add(filter_bytes / 2),
+    ));
+    let runtime = Arc::new(
+        RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::clone(&pool) as Arc<dyn MemoryPool>)
+            .build()
+            .unwrap(),
+    );
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(4))
+        .with_runtime_env(runtime)
+        .build();
+    let limited_context = SessionContext::new_with_state(state).task_ctx();
+    let (filters, workers) = build_transfer_filters(
+        &source,
+        &keys,
+        &random_state,
+        0.01,
+        limited_context.as_ref(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(workers, 1);
+    assert_eq!(pool.reserved(), filter_bytes);
+    drop(filters);
+    assert_eq!(pool.reserved(), 0);
+}
 
 #[test]
 fn native_join_filter_coverage_counts_collect_left_boundaries() {

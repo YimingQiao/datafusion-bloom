@@ -3,7 +3,7 @@ use datafusion::arrow::array::{
     UInt16Array, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::buffer::BooleanBuffer;
-use datafusion::common::Result;
+use datafusion::common::{Result, internal_err};
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 
@@ -18,7 +18,7 @@ pub(crate) struct TransferBloomFilter {
     _reservation: Option<MemoryReservation>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum FilterStorage {
     Bloom {
         words: Box<[u64]>,
@@ -238,6 +238,67 @@ impl TransferBloomFilter {
         true
     }
 
+    /// Union a worker-local membership structure into this one. Parallel
+    /// builders allocate identical shapes, so the merge is a linear OR with
+    /// no hashing and preserves the serial filter exactly.
+    pub(crate) fn merge_from(&mut self, other: &Self) -> Result<()> {
+        match (&mut self.storage, &other.storage) {
+            (
+                FilterStorage::Bloom {
+                    words,
+                    bit_mask,
+                    probes,
+                    is_empty,
+                },
+                FilterStorage::Bloom {
+                    words: other_words,
+                    bit_mask: other_bit_mask,
+                    probes: other_probes,
+                    is_empty: other_is_empty,
+                },
+            ) if words.len() == other_words.len()
+                && bit_mask == other_bit_mask
+                && probes == other_probes =>
+            {
+                for (word, other_word) in words.iter_mut().zip(other_words) {
+                    *word |= *other_word;
+                }
+                *is_empty &= *other_is_empty;
+                Ok(())
+            }
+            (
+                FilterStorage::DenseInteger {
+                    words,
+                    minimum,
+                    maximum,
+                },
+                FilterStorage::DenseInteger {
+                    words: other_words,
+                    minimum: other_minimum,
+                    maximum: other_maximum,
+                },
+            ) if words.len() == other_words.len()
+                && minimum == other_minimum
+                && maximum == other_maximum =>
+            {
+                for (word, other_word) in words.iter_mut().zip(other_words) {
+                    *word |= *other_word;
+                }
+                Ok(())
+            }
+            _ => internal_err!("cannot merge differently shaped Bloom transfer filters"),
+        }
+    }
+
+    /// Bytes charged to the query memory pool by this structure.
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        match &self.storage {
+            FilterStorage::Bloom { words, .. } | FilterStorage::DenseInteger { words, .. } => {
+                words.len().saturating_mul(std::mem::size_of::<u64>())
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn bit_count(&self) -> usize {
         match &self.storage {
@@ -328,6 +389,46 @@ mod tests {
         assert_eq!(
             filter.integer_mask(&values).unwrap(),
             BooleanArray::from(vec![false, true, false, true, false, true, false])
+        );
+    }
+
+    #[test]
+    fn worker_local_filters_merge_without_false_negatives() {
+        let mut left = TransferBloomFilter::with_capacity(10_000, 0.01);
+        let mut right = TransferBloomFilter::with_capacity(10_000, 0.01);
+        let mut serial = TransferBloomFilter::with_capacity(10_000, 0.01);
+        for value in 0..5_000_u64 {
+            left.insert(value.wrapping_mul(17));
+            serial.insert(value.wrapping_mul(17));
+        }
+        for value in 5_000..10_000_u64 {
+            right.insert(value.wrapping_mul(17));
+            serial.insert(value.wrapping_mul(17));
+        }
+
+        left.merge_from(&right).unwrap();
+        assert_eq!(left.storage, serial.storage);
+        for value in 0..10_000_u64 {
+            assert!(left.might_contain(value.wrapping_mul(17)));
+        }
+    }
+
+    #[test]
+    fn worker_local_dense_filters_merge_exactly() {
+        let mut left = TransferBloomFilter::dense_integer(10, 20, 64).unwrap();
+        let mut right = TransferBloomFilter::dense_integer(10, 20, 64).unwrap();
+        left.insert_integer(10);
+        right.insert_integer(20);
+        left.merge_from(&right).unwrap();
+        let mut serial = TransferBloomFilter::dense_integer(10, 20, 64).unwrap();
+        serial.insert_integer(10);
+        serial.insert_integer(20);
+        assert_eq!(left.storage, serial.storage);
+
+        let values = Arc::new(Int32Array::from(vec![10, 15, 20])) as ArrayRef;
+        assert_eq!(
+            left.integer_mask(&values).unwrap(),
+            BooleanArray::from(vec![true, false, true])
         );
     }
 }

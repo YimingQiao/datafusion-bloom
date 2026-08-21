@@ -15,7 +15,7 @@ async-trait = "0.1"
 datafusion = { version = "54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
 datafusion-datasource = "54.1.0"
 futures = "0.3"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 
 [dev-dependencies]
 tempfile = "3"
