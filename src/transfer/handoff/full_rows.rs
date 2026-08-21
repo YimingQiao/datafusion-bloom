@@ -15,6 +15,7 @@ struct StreamingHandoffReservationState {
     reservation: MemoryReservation,
     retained_bytes: usize,
     transient_bytes: usize,
+    compaction_scratch_bytes: usize,
     peak_reserved_bytes: usize,
 }
 
@@ -27,6 +28,7 @@ impl StreamingHandoffReservation {
                 reservation,
                 retained_bytes: 0,
                 transient_bytes: 0,
+                compaction_scratch_bytes: 0,
                 peak_reserved_bytes,
             }),
         }))
@@ -34,25 +36,31 @@ impl StreamingHandoffReservation {
 
     /// Add a reader batch to the transient side of the ownership boundary.
     /// Buffered partial batches from every partition remain accounted here.
-    fn begin_input(&self, bytes: usize, compaction_input_bytes: usize) -> Result<()> {
+    fn begin_input(&self, bytes: usize, compaction_input_bytes: usize) -> Result<usize> {
         let mut state = self.lock()?;
         let transient_bytes = state.transient_bytes.saturating_add(bytes);
         // Compaction can briefly own both the reader group and a fresh Arrow
-        // allocation. The fixed slack covers allocator/array metadata when a
-        // canonical output is slightly larger than its logical input.
-        let scratch_bytes = compaction_input_bytes.saturating_add(MIN_COMPACTION_SCRATCH_BYTES);
+        // allocation. Sum scratch across active partition workers; accounting
+        // only the largest worker would understate the parallel peak.
+        let scratch_bytes = if compaction_input_bytes == 0 {
+            0
+        } else {
+            compaction_input_bytes.saturating_add(MIN_COMPACTION_SCRATCH_BYTES)
+        };
+        let compaction_scratch_bytes = state.compaction_scratch_bytes.saturating_add(scratch_bytes);
         let required = state
             .retained_bytes
             .saturating_add(transient_bytes)
-            .saturating_add(scratch_bytes);
+            .saturating_add(compaction_scratch_bytes);
         if required > state.reservation.size() {
             state
                 .reservation
                 .try_grow(required - state.reservation.size())?;
         }
         state.transient_bytes = transient_bytes;
+        state.compaction_scratch_bytes = compaction_scratch_bytes;
         state.peak_reserved_bytes = state.peak_reserved_bytes.max(state.reservation.size());
-        Ok(())
+        Ok(scratch_bytes)
     }
 
     /// Atomically replace consumed reader buffers with compacted output and
@@ -62,6 +70,7 @@ impl StreamingHandoffReservation {
         consumed_transient_bytes: usize,
         retained_bytes: usize,
         buffered_transient_bytes: usize,
+        scratch_bytes: usize,
     ) -> Result<()> {
         let mut state = self.lock()?;
         let transient_bytes = state
@@ -73,8 +82,18 @@ impl StreamingHandoffReservation {
                 )
             })?
             .saturating_add(buffered_transient_bytes);
+        let compaction_scratch_bytes = state
+            .compaction_scratch_bytes
+            .checked_sub(scratch_bytes)
+            .ok_or_else(|| {
+                DataFusionError::Internal(
+                    "Bloom streaming compaction memory accounting underflow".to_string(),
+                )
+            })?;
         let retained_bytes = state.retained_bytes.saturating_add(retained_bytes);
-        let required = retained_bytes.saturating_add(transient_bytes);
+        let required = retained_bytes
+            .saturating_add(transient_bytes)
+            .saturating_add(compaction_scratch_bytes);
         if required > state.reservation.size() {
             state
                 .reservation
@@ -82,6 +101,7 @@ impl StreamingHandoffReservation {
         }
         state.retained_bytes = retained_bytes;
         state.transient_bytes = transient_bytes;
+        state.compaction_scratch_bytes = compaction_scratch_bytes;
         state.peak_reserved_bytes = state.peak_reserved_bytes.max(state.reservation.size());
         Ok(())
     }
@@ -97,10 +117,10 @@ impl StreamingHandoffReservation {
         let state = tracker.state.into_inner().map_err(|_| {
             DataFusionError::Internal("Bloom streaming reservation lock was poisoned".to_string())
         })?;
-        if state.transient_bytes != 0 {
+        if state.transient_bytes != 0 || state.compaction_scratch_bytes != 0 {
             return Err(DataFusionError::Internal(format!(
-                "Bloom streaming collection retained {} bytes of reader state",
-                state.transient_bytes
+                "Bloom streaming collection retained {} transient and {} scratch bytes",
+                state.transient_bytes, state.compaction_scratch_bytes
             )));
         }
         state.reservation.try_resize(state.retained_bytes)?;
@@ -145,7 +165,8 @@ async fn collect_full_rows_partition(
         reader_bytes = reader_bytes.saturating_add(batch_bytes);
         input_batches += 1;
 
-        reservation.begin_input(batch_bytes, buffered_bytes.saturating_add(batch_bytes))?;
+        let scratch_bytes =
+            reservation.begin_input(batch_bytes, buffered_bytes.saturating_add(batch_bytes))?;
         let compact_started = Instant::now();
         let compacted = builder.push(batch)?;
         compact_elapsed += compact_started.elapsed();
@@ -155,11 +176,13 @@ async fn collect_full_rows_partition(
             buffered_bytes.saturating_add(batch_bytes),
             compacted_bytes,
             next_buffered_bytes,
+            scratch_bytes,
         )?;
         buffered_bytes = next_buffered_bytes;
         batches.extend(compacted);
     }
 
+    let scratch_bytes = reservation.begin_input(0, buffered_bytes)?;
     let compact_started = Instant::now();
     let final_batch = builder.finish()?;
     compact_elapsed += compact_started.elapsed();
@@ -167,7 +190,7 @@ async fn collect_full_rows_partition(
         .as_ref()
         .map(batch_physical_bytes)
         .unwrap_or_default();
-    reservation.commit_compaction(buffered_bytes, final_bytes, 0)?;
+    reservation.commit_compaction(buffered_bytes, final_bytes, 0, scratch_bytes)?;
     if let Some(batch) = final_batch {
         batches.push(batch);
     }
@@ -215,11 +238,34 @@ pub(super) async fn collect_full_rows_handoff(
     let prepare_elapsed = prepare_started.elapsed();
     let collect_started = Instant::now();
     let streams = execute_stream_partitioned(Arc::clone(&plan), Arc::clone(&context))?;
+    let partition_count = streams.len();
     let target_batch_rows = context.session_config().batch_size();
-    let streamed = try_join_all(streams.into_iter().map(|stream| {
-        collect_full_rows_partition(stream, target_batch_rows, Arc::clone(&reservation))
-    }))
-    .await?;
+    // Polling every stream from one future only interleaves partitions; the
+    // CPU-heavy Parquet decode, transfer filtering, and compaction still run
+    // on one runtime worker. Give each physical partition its own task, as
+    // DataFusion's native partition collector does, while restoring the
+    // original partition order before constructing the handoff.
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, stream) in streams.into_iter().enumerate() {
+        let reservation = Arc::clone(&reservation);
+        tasks.spawn(async move {
+            (
+                index,
+                collect_full_rows_partition(stream, target_batch_rows, reservation).await,
+            )
+        });
+    }
+    let mut streamed = Vec::with_capacity(partition_count);
+    while let Some(task) = tasks.join_next().await {
+        let (index, partition) =
+            task.map_err(|error| DataFusionError::ExecutionJoin(Box::new(error)))?;
+        streamed.push((index, partition?));
+    }
+    streamed.sort_unstable_by_key(|(index, _)| *index);
+    let streamed = streamed
+        .into_iter()
+        .map(|(_, partition)| partition)
+        .collect::<Vec<_>>();
     let collect_elapsed = collect_started.elapsed();
     let reader_bytes = streamed
         .iter()
@@ -248,8 +294,13 @@ pub(super) async fn collect_full_rows_handoff(
             compact_elapsed.as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "  [materialize-stream] reader_bytes={} retained_bytes={} peak_reserved_bytes={} input_batches={} output_batches={}",
-            reader_bytes, retained_bytes, peak_reserved_bytes, input_batches, output_batches,
+            "  [materialize-stream] partitions={} reader_bytes={} retained_bytes={} peak_reserved_bytes={} input_batches={} output_batches={}",
+            partition_count,
+            reader_bytes,
+            retained_bytes,
+            peak_reserved_bytes,
+            input_batches,
+            output_batches,
         );
         eprintln!(
             "  [materialize-metrics]\n{}",
@@ -262,4 +313,41 @@ pub(super) async fn collect_full_rows_handoff(
         !filters.is_empty(),
         reservation,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reservation_sums_scratch_from_concurrent_partition_compactions() {
+        let context = TaskContext::default();
+        let reservation =
+            MemoryConsumer::new("BloomStreamingAccountingTest").register(context.memory_pool());
+        let tracker = StreamingHandoffReservation::new(reservation, 0).unwrap();
+
+        let first_scratch = tracker.begin_input(100, 200).unwrap();
+        let second_scratch = tracker.begin_input(300, 400).unwrap();
+        {
+            let state = tracker.lock().unwrap();
+            assert_eq!(state.transient_bytes, 400);
+            assert_eq!(
+                state.compaction_scratch_bytes,
+                first_scratch + second_scratch
+            );
+            assert!(
+                state.reservation.size() >= state.transient_bytes + state.compaction_scratch_bytes
+            );
+        }
+
+        tracker
+            .commit_compaction(300, 250, 0, second_scratch)
+            .unwrap();
+        tracker
+            .commit_compaction(100, 80, 0, first_scratch)
+            .unwrap();
+        let (reservation, retained_bytes, _) = tracker.finish().unwrap();
+        assert_eq!(retained_bytes, 330);
+        assert_eq!(reservation.size(), retained_bytes);
+    }
 }

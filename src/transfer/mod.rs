@@ -49,10 +49,6 @@ use datafusion::physical_plan::filter_pushdown::{
     ChildFilterPushdownResult, ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation,
     PushedDown,
 };
-use datafusion::physical_plan::joins::{
-    CrossJoinExec, HashJoinExec, NestedLoopJoinExec, PartitionMode, PiecewiseMergeJoinExec,
-    SortMergeJoinExec, SymmetricHashJoinExec,
-};
 use datafusion::physical_plan::limit::LocalLimitExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::scalar_subquery::ScalarSubqueryExec;
@@ -331,31 +327,6 @@ impl BloomTransferEngine {
         if contains_scalar_subquery(&transfer_plan) {
             if self.config.log_transfer_steps {
                 eprintln!("[Bloom] scope skipped: scalar_subquery_dependency");
-            }
-            return Ok(formal_plan);
-        }
-        if self.config.handoff_policy == HandoffPolicy::FullRows
-            && context.session_config().target_partitions() > 1
-            && context
-                .session_config()
-                .options()
-                .optimizer
-                .enable_join_dynamic_filter_pushdown
-            && let Some(coverage) = native_join_filter_coverage(&formal_plan)
-            && coverage.collect_left.saturating_mul(3) >= coverage.join_count.saturating_mul(2)
-        {
-            // DataFusion's CollectLeft joins build a dynamic filter from the
-            // left input before scanning the right input. When native formal
-            // execution already covers most join boundaries that way, running
-            // every reduction table by table in transfer serializes largely
-            // duplicate work. Keep Bloom for scopes where Partitioned joins
-            // leave a substantial part of the graph uncovered. This is the
-            // DataFusion counterpart of Bloom's DuckDB left-deep guard.
-            if self.config.log_transfer_steps {
-                eprintln!(
-                    "[Bloom] scope skipped: native_join_filter_coverage collect_left={} joins={}",
-                    coverage.collect_left, coverage.join_count
-                );
             }
             return Ok(formal_plan);
         }

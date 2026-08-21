@@ -28,51 +28,6 @@ pub(super) fn source_rows(plan: &Arc<dyn ExecutionPlan>) -> Result<Option<usize>
     Ok(Some(total))
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) struct NativeJoinFilterCoverage {
-    pub(super) join_count: usize,
-    pub(super) collect_left: usize,
-}
-
-/// Count the inner hash-join boundaries for which DataFusion's formal plan
-/// already supplies a build-to-probe dynamic filter.
-pub(super) fn native_join_filter_coverage(
-    plan: &Arc<dyn ExecutionPlan>,
-) -> Option<NativeJoinFilterCoverage> {
-    let mut coverage = NativeJoinFilterCoverage::default();
-    if !collect_join_filter_coverage(plan, &mut coverage) || coverage.join_count == 0 {
-        return None;
-    }
-    Some(coverage)
-}
-
-fn collect_join_filter_coverage(
-    plan: &Arc<dyn ExecutionPlan>,
-    coverage: &mut NativeJoinFilterCoverage,
-) -> bool {
-    if let Some(join) = plan.downcast_ref::<HashJoinExec>() {
-        if join.join_type() != &datafusion::logical_expr::JoinType::Inner {
-            return false;
-        }
-        coverage.join_count += 1;
-        if join.partition_mode() == &PartitionMode::CollectLeft {
-            coverage.collect_left += 1;
-        }
-    } else if plan.downcast_ref::<CrossJoinExec>().is_some()
-        || plan.downcast_ref::<NestedLoopJoinExec>().is_some()
-        || plan.downcast_ref::<PiecewiseMergeJoinExec>().is_some()
-        || plan.downcast_ref::<SortMergeJoinExec>().is_some()
-        || plan.downcast_ref::<SymmetricHashJoinExec>().is_some()
-    {
-        // A coverage ratio over only the hash joins is not representative when
-        // the formal plan contains another join implementation.
-        return false;
-    }
-    plan.children()
-        .into_iter()
-        .all(|child| collect_join_filter_coverage(child, coverage))
-}
-
 pub(super) fn contains_scalar_subquery(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.downcast_ref::<ScalarSubqueryExec>().is_some()
         || plan.children().into_iter().any(contains_scalar_subquery)

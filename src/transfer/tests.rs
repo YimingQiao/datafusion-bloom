@@ -3,26 +3,23 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, StringViewArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
 use datafusion::common::hash_utils::RandomState;
-use datafusion::common::{NullEquality, ScalarValue};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::{SessionConfig, SessionContext};
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::logical_expr::{JoinType, Operator};
+use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::empty::EmptyExec;
-use datafusion::physical_plan::joins::{CrossJoinExec, HashJoinExec, PartitionMode};
 
 use super::handoff::predicate_is_expensive;
 use super::policy::{MaterializationFacts, MaterializationStrategy, choose_materialization};
 use super::sampling::localize_range;
 use super::{
     HandoffData, MaterializedPartitionBuilder, TransferHandoff, build_transfer_filters,
-    compact_materialized_partition, evaluate_hashes, native_join_filter_coverage,
-    observed_handoff_widths, partition_physical_bytes,
+    compact_materialized_partition, evaluate_hashes, observed_handoff_widths,
+    partition_physical_bytes,
 };
 use crate::config::HandoffPolicy;
 
@@ -103,60 +100,6 @@ async fn membership_build_parallelizes_and_falls_back_under_memory_pressure() {
     assert_eq!(pool.reserved(), filter_bytes);
     drop(filters);
     assert_eq!(pool.reserved(), 0);
-}
-
-#[test]
-fn native_join_filter_coverage_counts_collect_left_boundaries() {
-    fn leaf() -> Arc<dyn ExecutionPlan> {
-        Arc::new(EmptyExec::new(Arc::new(Schema::new(vec![Field::new(
-            "id",
-            DataType::Int64,
-            false,
-        )]))))
-    }
-
-    fn join(
-        left: Arc<dyn ExecutionPlan>,
-        right: Arc<dyn ExecutionPlan>,
-        mode: PartitionMode,
-    ) -> Arc<dyn ExecutionPlan> {
-        Arc::new(
-            HashJoinExec::try_new(
-                left,
-                right,
-                vec![(
-                    Arc::new(Column::new("id", 0)) as Arc<dyn PhysicalExpr>,
-                    Arc::new(Column::new("id", 0)) as Arc<dyn PhysicalExpr>,
-                )],
-                None,
-                &JoinType::Inner,
-                None,
-                mode,
-                NullEquality::NullEqualsNothing,
-                false,
-            )
-            .unwrap(),
-        )
-    }
-
-    let covered = join(leaf(), leaf(), PartitionMode::CollectLeft);
-    let mixed = join(covered, leaf(), PartitionMode::Partitioned);
-    let covered = join(mixed, leaf(), PartitionMode::CollectLeft);
-    let plan = join(covered, leaf(), PartitionMode::CollectLeft);
-    let coverage = native_join_filter_coverage(&plan).unwrap();
-    assert_eq!(coverage.join_count, 4);
-    assert_eq!(coverage.collect_left, 3);
-    assert!(
-        coverage.collect_left * 3 >= coverage.join_count * 2,
-        "three of four boundaries should satisfy the parallel guard"
-    );
-
-    let mixed_kind = Arc::new(CrossJoinExec::new(plan, leaf())) as Arc<dyn ExecutionPlan>;
-    assert_eq!(
-        native_join_filter_coverage(&mixed_kind),
-        None,
-        "non-hash joins make native dynamic-filter coverage incomplete"
-    );
 }
 
 #[test]

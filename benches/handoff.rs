@@ -119,9 +119,9 @@ async fn main() -> Result<()> {
 }
 
 async fn make_context(path: &Path, bloom: Option<BloomConfig>) -> Result<SessionContext> {
-    // This benchmark isolates handoff representation rather than DataFusion's
-    // native dynamic-filter coverage guard. Disable that native predicate for
-    // every mode so FullRows and RowLocations execute the same transfer graph.
+    // This benchmark isolates handoff representation. Disable DataFusion's
+    // native dynamic predicate in every mode so FullRows and RowLocations
+    // execute the same transfer graph.
     let mut state_config = SessionConfig::new().with_target_partitions(64);
     state_config
         .options_mut()
