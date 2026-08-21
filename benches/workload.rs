@@ -150,7 +150,7 @@ impl Options {
         let mut bloom_only = false;
         let mut row_locations = false;
         let mut instant_sampling = false;
-        let mut instant_parquet_row_groups = 8;
+        let mut instant_parquet_row_groups = 4;
         let mut log_transfer = false;
         let mut fresh_context_per_query = false;
         let mut parquet_pushdown = false;
@@ -1421,7 +1421,7 @@ fn print_help() {
          --runs N                  Timed pairs per query (default: 5)\n\
          --row-locations           Enable experimental cost-based row-location handoffs\n\
          --instant-sampling        Use query-local projected samples instead of the cache\n\
-         --instant-parquet-row-groups N  Row groups per instant Parquet sample (default: 8)\n\
+         --instant-parquet-row-groups N  Row groups per instant Parquet sample (default: 4)\n\
          --fresh-context-per-query Do not reuse Bloom samples across different queries\n\
          --parquet-pushdown        Enable Parquet late-materialized filter pushdown\n\
          --post-scan-membership    Evaluate Bloom membership after Parquet decoding\n\

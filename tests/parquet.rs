@@ -5,8 +5,8 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::Result;
 use datafusion::common::test_util::batches_to_sort_string;
+use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::physical_plan::parquet::ParquetAccessPlan;
 use datafusion::datasource::source::DataSourceExec;
@@ -208,6 +208,97 @@ async fn instant_sampling_does_not_retain_a_session_sample() -> Result<()> {
         instant_pool.reserved(),
         0,
         "instant mode should release its query-local sample with the plan"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_instant_queries_are_deterministic_and_release_memory() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let left_path = write_table(
+        &directory,
+        "concurrent_instant_left.parquet",
+        "left_value",
+        (0..20_000).collect(),
+        (0..20_000)
+            .map(|id| if id % 2 == 0 { "keep" } else { "drop" })
+            .collect(),
+    )?;
+    let right_path = write_table(
+        &directory,
+        "concurrent_instant_right.parquet",
+        "right_value",
+        (0..20_000).collect(),
+        vec!["right"; 20_000],
+    )?;
+    let pool = Arc::new(GreedyMemoryPool::new(256 * 1024 * 1024));
+    let runtime = Arc::new(
+        RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::clone(&pool) as Arc<dyn MemoryPool>)
+            .build()?,
+    );
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(4))
+        .with_runtime_env(runtime)
+        .build();
+    let state = install_bloom(
+        state,
+        BloomConfig {
+            excitation_threshold: 1.01,
+            ..BloomConfig::default()
+        }
+        .with_all_bounded_sources()
+        .with_instant_sampling(),
+    )?;
+    let context = SessionContext::new_with_state(state);
+    context
+        .register_parquet("left_table", &left_path, ParquetReadOptions::default())
+        .await?;
+    context
+        .register_parquet("right_table", &right_path, ParquetReadOptions::default())
+        .await?;
+
+    let query = "SELECT count(*) AS matched \
+                 FROM left_table l JOIN right_table r ON l.id = r.id \
+                 WHERE l.left_value = 'keep'";
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let context = context.clone();
+        tasks.spawn(async move {
+            let plan = context.sql(query).await?.create_physical_plan().await?;
+            let handoffs = displayable(plan.as_ref())
+                .indent(false)
+                .to_string()
+                .matches("BloomCollection")
+                .count();
+            let batches = collect(plan, context.task_ctx()).await?;
+            Ok::<_, DataFusionError>((handoffs, batches_to_sort_string(&batches)))
+        });
+    }
+
+    while let Some(task) = tasks.join_next().await {
+        let (handoffs, result) =
+            task.map_err(|error| DataFusionError::ExecutionJoin(Box::new(error)))??;
+        assert!(
+            handoffs > 0,
+            "Instant query should produce a FullRows handoff"
+        );
+        assert_eq!(
+            result,
+            [
+                "+---------+",
+                "| matched |",
+                "+---------+",
+                "| 10000   |",
+                "+---------+",
+            ]
+            .join("\n")
+        );
+    }
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "concurrent Instant queries should release samples and handoffs"
     );
     Ok(())
 }

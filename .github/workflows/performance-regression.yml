@@ -47,7 +47,7 @@ concurrency:
 
 jobs:
   compare:
-    name: JOB + TPC-H SF1
+    name: JOB + TPC-H SF1 (Prepared + Instant)
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -171,6 +171,8 @@ jobs:
             --tpch-data-dir "${GITHUB_WORKSPACE}/benchmark_data/tpch/sf1/parquet" \
             --workload job \
             --workload tpch_sf1 \
+            --sampling-mode prepared \
+            --sampling-mode instant \
             --out-dir "${RESULT_DIR}"
 
       - name: Upload benchmark logs

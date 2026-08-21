@@ -87,7 +87,7 @@ impl Default for BloomConfig {
             max_transfer_rounds: 64,
             sample_rows: 10_000,
             sampling_mode: SamplingMode::Prepared,
-            instant_parquet_row_groups: 8,
+            instant_parquet_row_groups: 4,
             excitation_threshold: 1.0,
         }
     }

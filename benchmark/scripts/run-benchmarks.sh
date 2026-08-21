@@ -8,7 +8,7 @@ warmups=${BLOOM_BENCH_WARMUPS:-0}
 runs=${BLOOM_BENCH_RUNS:-1}
 scale_factor=${BLOOM_BENCH_TPCH_SCALE_FACTOR:-10}
 sampling=${BLOOM_BENCH_SAMPLING:-prepared}
-instant_row_groups=${BLOOM_BENCH_INSTANT_ROW_GROUPS:-8}
+instant_row_groups=${BLOOM_BENCH_INSTANT_ROW_GROUPS:-4}
 run_tag=${BLOOM_BENCH_RUN_TAG:-$(date -u +%Y%m%dT%H%M%SZ)}
 output_dir=${BLOOM_BENCH_OUTPUT_DIR:-"$project_dir/benchmark_results/$run_tag"}
 

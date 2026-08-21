@@ -59,6 +59,18 @@ def parse_args():
         dest="workloads",
         help="Workload to compare; repeat to select both (default: both)",
     )
+    parser.add_argument(
+        "--sampling-mode",
+        action="append",
+        choices=("prepared", "instant"),
+        dest="sampling_modes",
+        help="Bloom sampling mode; repeat to select both (default: prepared)",
+    )
+    parser.add_argument(
+        "--instant-parquet-row-groups",
+        type=positive_integer,
+        default=4,
+    )
     parser.add_argument("--threads", type=positive_integer, default=1)
     parser.add_argument("--warmups", type=nonnegative_integer, default=0)
     parser.add_argument("--runs", type=positive_integer, default=1)
@@ -117,7 +129,7 @@ def warm_page_cache(data_dir):
                 pass
 
 
-def runner_command(args, workload, runner, side):
+def runner_command(args, workload, runner, side, sampling_mode):
     if workload == "job":
         data_dir = args.job_data_dir
         runner_workload = "job"
@@ -143,15 +155,24 @@ def runner_command(args, workload, runner, side):
         "--parquet-pushdown",
         *extra,
     ]
+    if sampling_mode == "instant" and side != "datafusion":
+        command += [
+            "--instant-sampling",
+            "--instant-parquet-row-groups",
+            str(args.instant_parquet_row_groups),
+        ]
     command.append("--baseline-only" if side == "datafusion" else "--bloom-only")
     return command
 
 
-def run_once(args, workload, side, runner, round_index):
+def run_once(args, workload, sampling_mode, side, runner, round_index):
     data_dir = args.job_data_dir if workload == "job" else args.tpch_data_dir
     warm_page_cache(data_dir)
-    command = runner_command(args, workload, runner, side)
-    log_path = args.out_dir / f"{workload}.{side}.round{round_index + 1}.log"
+    command = runner_command(args, workload, runner, side, sampling_mode)
+    log_path = (
+        args.out_dir
+        / f"{workload}.{sampling_mode}.{side}.round{round_index + 1}.log"
+    )
     print(
         f">>> {workload} {side} round {round_index + 1}: {shlex.join(command)}",
         flush=True,
@@ -282,7 +303,8 @@ def report_summary(summary, regression_ratio, geomean_seconds, no_fail):
     gate_failed = ratio >= regression_ratio or delta >= geomean_seconds
     status = "REGRESSION" if gate_failed else "PASS"
     lines = [
-        f"## Performance regression: `{summary['workload']}` — {status}",
+        f"## Performance regression: `{summary['workload']}` "
+        f"(`{summary.get('sampling_mode', 'prepared')}`) — {status}",
         "",
         "| Metric | Base | Candidate | Change |",
         "| --- | ---: | ---: | ---: |",
@@ -344,7 +366,8 @@ def report_datafusion_summary(summary, slowdown_ratio, slowdown_seconds, no_fail
     gate_failed = ratio >= slowdown_ratio and delta >= slowdown_seconds
     status = "REGRESSION" if gate_failed else "PASS"
     lines = [
-        f"## Bloom against DataFusion: `{summary['workload']}` — {status}",
+        f"## Bloom against DataFusion: `{summary['workload']}` "
+        f"(`{summary.get('sampling_mode', 'prepared')}`) — {status}",
         "",
         "| Metric | DataFusion | Bloom | Bloom speedup |",
         "| --- | ---: | ---: | ---: |",
@@ -389,7 +412,7 @@ def report_datafusion_summary(summary, slowdown_ratio, slowdown_seconds, no_fail
     return gate_failed
 
 
-def compare_workload(args, workload):
+def compare_workload(args, workload, sampling_mode):
     timings = {
         "base": defaultdict(list),
         "candidate": defaultdict(list),
@@ -409,28 +432,36 @@ def compare_workload(args, workload):
     for round_index in range(args.rounds):
         order = orders[round_index % len(orders)]
         for side in order:
-            current = run_once(args, workload, side, runners[side], round_index)
+            current = run_once(
+                args,
+                workload,
+                sampling_mode,
+                side,
+                runners[side],
+                round_index,
+            )
             merge_measurements(timings[side], row_counts[side], current)
-    return (
-        summarize_timings(
-            workload,
-            timings["base"],
-            timings["candidate"],
-            row_counts["base"],
-            row_counts["candidate"],
-            args.rounds,
-            args.regression_ratio,
-        ),
-        summarize_timings(
-            workload,
-            timings["datafusion"],
-            timings["candidate"],
-            row_counts["datafusion"],
-            row_counts["candidate"],
-            args.rounds,
-            args.regression_ratio,
-        ),
+    version_summary = summarize_timings(
+        workload,
+        timings["base"],
+        timings["candidate"],
+        row_counts["base"],
+        row_counts["candidate"],
+        args.rounds,
+        args.regression_ratio,
     )
+    datafusion_summary = summarize_timings(
+        workload,
+        timings["datafusion"],
+        timings["candidate"],
+        row_counts["datafusion"],
+        row_counts["candidate"],
+        args.rounds,
+        args.regression_ratio,
+    )
+    version_summary["sampling_mode"] = sampling_mode
+    datafusion_summary["sampling_mode"] = sampling_mode
+    return version_summary, datafusion_summary
 
 
 def main():
@@ -462,22 +493,26 @@ def main():
     args.out_dir = args.out_dir.resolve()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     workloads = args.workloads or list(WORKLOADS)
+    sampling_modes = args.sampling_modes or ["prepared"]
     failed = False
     try:
-        for workload in workloads:
-            version_summary, datafusion_summary = compare_workload(args, workload)
-            failed |= report_summary(
-                version_summary,
-                args.regression_ratio,
-                args.geomean_regression_seconds,
-                args.no_fail,
-            )
-            failed |= report_datafusion_summary(
-                datafusion_summary,
-                args.regression_ratio,
-                args.geomean_regression_seconds,
-                args.no_fail,
-            )
+        for sampling_mode in sampling_modes:
+            for workload in workloads:
+                version_summary, datafusion_summary = compare_workload(
+                    args, workload, sampling_mode
+                )
+                failed |= report_summary(
+                    version_summary,
+                    args.regression_ratio,
+                    args.geomean_regression_seconds,
+                    args.no_fail,
+                )
+                failed |= report_datafusion_summary(
+                    datafusion_summary,
+                    args.regression_ratio,
+                    args.geomean_regression_seconds,
+                    args.no_fail,
+                )
     except RuntimeError as error:
         emit_annotation("error", "Performance benchmark failure", str(error))
         print(f"performance comparison failed: {error}", file=sys.stderr)

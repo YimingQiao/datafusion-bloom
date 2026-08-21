@@ -1,5 +1,6 @@
 import sys
 import unittest
+from argparse import Namespace
 from collections import defaultdict
 from contextlib import redirect_stdout
 from io import StringIO
@@ -13,6 +14,7 @@ from compare_performance import (  # noqa: E402
     parse_measurements,
     report_datafusion_summary,
     report_summary,
+    runner_command,
     summarize_timings,
 )
 
@@ -47,6 +49,33 @@ class ParseMeasurementsTest(unittest.TestCase):
     def test_rejects_missing_rows(self):
         with self.assertRaisesRegex(RuntimeError, "no bloom timing rows"):
             parse_measurements("unrelated output", "bloom")
+
+
+class RunnerCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.args = Namespace(
+            job_data_dir=Path("/data/job"),
+            tpch_data_dir=Path("/data/tpch"),
+            threads=1,
+            warmups=0,
+            runs=1,
+            instant_parquet_row_groups=4,
+        )
+
+    def test_enables_instant_sampling_for_bloom(self):
+        command = runner_command(
+            self.args, "job", Path("/runner"), "candidate", "instant"
+        )
+        self.assertIn("--instant-sampling", command)
+        self.assertIn("--instant-parquet-row-groups", command)
+        self.assertIn("--bloom-only", command)
+
+    def test_keeps_datafusion_independent_of_sampling_mode(self):
+        command = runner_command(
+            self.args, "job", Path("/runner"), "datafusion", "instant"
+        )
+        self.assertNotIn("--instant-sampling", command)
+        self.assertIn("--baseline-only", command)
 
 
 class SummarizeTimingsTest(unittest.TestCase):
