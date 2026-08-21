@@ -79,14 +79,16 @@ gives:
 
 | Workload | Parquet | Queries | DataFusion | Bloom | Total speedup |
 |---|---:|---:|---:|---:|---:|
+| CEB IMDB | 1.43 GB, compressed | 3,133 | 1,306.373 s | 533.061 s | **2.451×** |
 | JOB | 1.43 GB, compressed | 113 | 28.065 s | 15.894 s | **1.766×** |
+| JOB | 2.58 GB, uncompressed | 113 | 24.889 s | 11.253 s | **2.212×** |
+| STATS-CEB | 12.9 MB, compressed | 146 | 182.136 s | 54.444 s | **3.345×** |
 | TPC-H SF10 | 2.47 GB, compressed | 22 | 18.803 s | 13.636 s | **1.379×** |
 
-All 3,527 Baseline/Bloom result pairs in the single-thread suite produced
-identical complete-output fingerprints; the parallel reruns did as well. Both
-sides use the same files, filter pushdown, native 8,192-row batch size, and join
-dynamic filters. A prepared sample is built once per immutable source and
-reused across its long-lived Bloom session.
+All 3,527 Baseline/Bloom result pairs in each complete suite produced identical
+complete-output fingerprints. Both sides use the same files, filter pushdown,
+native 8,192-row batch size, and join dynamic filters. A prepared sample is
+built once per immutable source and reused across its long-lived Bloom session.
 
 The benchmark temporarily uses owned Arrow strings for both sides to avoid a
 DataFusion 54.1 `Utf8View` join-performance cliff. CEB uses `LargeUtf8` because
@@ -158,7 +160,7 @@ Set `BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3` for per-query medians; both
 Results tables use the script's practical full-suite default of one prewarmed
 pass.
 The parallel table uses
-`BLOOM_BENCH_THREADS=8 benchmark/scripts/run-benchmarks.sh job-compressed tpch`.
+`BLOOM_BENCH_THREADS=8 benchmark/scripts/run-benchmarks.sh`.
 
 ## Configuration
 
