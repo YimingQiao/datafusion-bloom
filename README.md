@@ -73,10 +73,20 @@ materialization, joins, aggregation, and full output consumption are included.
 | STATS-CEB | 12.9 MB, compressed | 146 | 186.347 s | 174.083 s | **1.070×** |
 | TPC-H SF10 | 2.47 GB, compressed | 22 | 83.506 s | 74.437 s | **1.122×** |
 
-All 3,527 Baseline/Bloom result pairs produced identical complete-output
-fingerprints. Both sides use the same files, filter pushdown, native 8,192-row
-batch size, and join dynamic filters. A prepared sample is built once per
-immutable source and reused across its long-lived Bloom session.
+The default FullRows handoff also materializes DataFusion's physical scan
+partitions in parallel. On the same machine and data, an eight-thread pass
+gives:
+
+| Workload | Parquet | Queries | DataFusion | Bloom | Total speedup |
+|---|---:|---:|---:|---:|---:|
+| JOB | 1.43 GB, compressed | 113 | 28.065 s | 15.894 s | **1.766×** |
+| TPC-H SF10 | 2.47 GB, compressed | 22 | 18.803 s | 13.636 s | **1.379×** |
+
+All 3,527 Baseline/Bloom result pairs in the single-thread suite produced
+identical complete-output fingerprints; the parallel reruns did as well. Both
+sides use the same files, filter pushdown, native 8,192-row batch size, and join
+dynamic filters. A prepared sample is built once per immutable source and
+reused across its long-lived Bloom session.
 
 The benchmark temporarily uses owned Arrow strings for both sides to avoid a
 DataFusion 54.1 `Utf8View` join-performance cliff. CEB uses `LargeUtf8` because
@@ -144,8 +154,11 @@ The runner includes planning, transfer, materialization, joins, and complete
 output consumption in elapsed time, alternates Baseline and Bloom execution
 order, and checks an order-independent fingerprint for every result. Raw logs
 and environment metadata go to the ignored `benchmark_results/` directory.
-Set `BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3` for per-query medians; the table
-above uses the script's practical full-suite default of one prewarmed pass.
+Set `BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3` for per-query medians; both
+Results tables use the script's practical full-suite default of one prewarmed
+pass.
+The parallel table uses
+`BLOOM_BENCH_THREADS=8 benchmark/scripts/run-benchmarks.sh job-compressed tpch`.
 
 ## Configuration
 
