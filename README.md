@@ -221,6 +221,16 @@ row-location handoffs, projection remapping, aggregate partitioning, and
 complete JOB/TPC-H output fingerprints. Approximate membership may retain extra
 rows but cannot remove a row that could satisfy the original exact join.
 
+## Related projects
+
+Bloom, BloomPG, and Bloom for Apache DataFusion are sibling projects exploring
+robust predicate transfer across different query engines.
+
+- [Bloom](https://github.com/YimingQiao/bloom) — DuckDB extension.
+- [BloomPG](https://github.com/YimingQiao/bloompg) — PostgreSQL extension.
+- [Bloom for Apache DataFusion](https://github.com/YimingQiao/datafusion-bloom)
+  — Apache DataFusion library (this repository).
+
 ## References
 
 - Mihalis Yannakakis,
@@ -236,8 +246,6 @@ rows but cannot remove a row that could satisfy the original exact join.
 - Yiming Qiao, Peter Boncz, and Huanchen Zhang,
   [*Robust Predicate Transfer with Dynamic Execution*](https://duckdb.org/library/robust-predicate-transfer-vldb/),
   PVLDB 2026.
-- Related implementations: [Bloom for DuckDB](https://github.com/YimingQiao/bloom)
-  and [BloomPG](https://github.com/YimingQiao/bloompg).
 
 ## License
 
