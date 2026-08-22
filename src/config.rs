@@ -63,11 +63,11 @@ pub struct BloomConfig {
     ///
     /// Stopping early can only retain extra rows; it cannot change query results.
     pub max_transfer_rounds: usize,
-    /// Target number of post-local-filter rows retained per table sample.
+    /// Target number of source rows represented by each sample acquisition.
     pub sample_rows: usize,
     /// Choose reusable source samples or query-local projected samples.
     pub sampling_mode: SamplingMode,
-    /// Maximum Parquet row groups read by one instant sample.
+    /// Number of stratified candidate Parquet row groups in an Instant sample.
     pub instant_parquet_row_groups: usize,
     /// Reactivate a table when its estimated cardinality falls below this
     /// fraction of the last committed baseline.
@@ -135,8 +135,8 @@ impl BloomConfig {
         self
     }
 
-    /// Bound the number of stratified Parquet row groups used by each instant
-    /// sample. Each selected group contributes one contiguous row window.
+    /// Set the Instant sample width. Each selected candidate row group
+    /// contributes one contiguous row window.
     pub fn with_instant_parquet_row_groups(mut self, row_groups: usize) -> Self {
         self.instant_parquet_row_groups = row_groups;
         self

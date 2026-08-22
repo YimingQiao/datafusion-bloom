@@ -15,6 +15,7 @@ use datafusion::execution::context::SessionConfig;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion_bloom::{BloomConfig, install_bloom};
@@ -56,6 +57,33 @@ fn write_batch(path: &Path, batch: &RecordBatch) -> Result<()> {
     writer.write(batch)?;
     writer.close()?;
     Ok(())
+}
+
+fn write_table_with_row_groups(
+    directory: &TempDir,
+    filename: &str,
+    value_name: &str,
+    ids: Vec<i64>,
+    values: Vec<&str>,
+    row_group_rows: usize,
+) -> Result<String> {
+    let schema = schema(value_name);
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(ids)),
+            Arc::new(StringArray::from(values)),
+        ],
+    )?;
+    let path = directory.path().join(filename);
+    let file = File::create(&path)?;
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(row_group_rows))
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(properties))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn count_row_selected_sources(plan: &Arc<dyn ExecutionPlan>) -> usize {
@@ -133,6 +161,85 @@ async fn instant_sampling_preserves_query_local_parquet_semantics() -> Result<()
             "| 2  | r2          |",
             "| 3  | r3          |",
             "+----+-------------+",
+        ]
+        .join("\n")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn instant_sampling_preserves_clustered_parquet_results() -> Result<()> {
+    const ROW_GROUPS: usize = 8;
+    const ROWS_PER_GROUP: usize = 10_000;
+    const KEEP_PER_GROUP: usize = 25;
+    let directory = tempfile::tempdir()?;
+    let rows = ROW_GROUPS * ROWS_PER_GROUP;
+    let ids = (0..rows as i64).collect::<Vec<_>>();
+    let values = (0..rows)
+        .map(|row| {
+            if row % ROWS_PER_GROUP >= ROWS_PER_GROUP - KEEP_PER_GROUP {
+                "keep"
+            } else {
+                "drop"
+            }
+        })
+        .collect::<Vec<_>>();
+    let left_path = write_table_with_row_groups(
+        &directory,
+        "clustered_left.parquet",
+        "left_value",
+        ids.clone(),
+        values,
+        ROWS_PER_GROUP,
+    )?;
+    let right_path = write_table_with_row_groups(
+        &directory,
+        "clustered_right.parquet",
+        "right_value",
+        ids,
+        vec!["right"; rows],
+        ROWS_PER_GROUP,
+    )?;
+
+    let state = SessionStateBuilder::new_with_default_features()
+        .with_config(SessionConfig::new().with_target_partitions(4))
+        .build();
+    let state = install_bloom(
+        state,
+        BloomConfig {
+            sample_rows: 64,
+            excitation_threshold: 1.01,
+            ..BloomConfig::default()
+        }
+        .with_all_bounded_sources()
+        .with_instant_sampling()
+        .with_instant_parquet_row_groups(ROW_GROUPS),
+    )?;
+    let context = SessionContext::new_with_state(state);
+    context
+        .register_parquet("left_table", &left_path, ParquetReadOptions::default())
+        .await?;
+    context
+        .register_parquet("right_table", &right_path, ParquetReadOptions::default())
+        .await?;
+
+    let batches = context
+        .sql(
+            "SELECT count(*) AS matches \
+             FROM left_table l JOIN right_table r ON l.id = r.id \
+             WHERE l.left_value = 'keep'",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches_to_sort_string(&batches),
+        [
+            "+---------+",
+            "| matches |",
+            "+---------+",
+            "| 200     |",
+            "+---------+",
         ]
         .join("\n")
     );

@@ -446,7 +446,7 @@ async fn run(options: Options) -> Result<()> {
         options.workload.name().to_uppercase()
     );
     println!(
-        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} scale_factor={} row_locations={} sampling={} instant_parquet_row_groups={} reoptimize={} parquet_pushdown={} predicate_cache_size={:?} membership={} context={}",
+        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} scale_factor={} row_locations={} sampling={} instant_row_groups={} reoptimize={} parquet_pushdown={} predicate_cache_size={:?} membership={} context={}",
         options.data_dir.display(),
         source_name(&options),
         options.query_dir.display(),
@@ -670,7 +670,7 @@ async fn run_bloom_only(
         options.workload.name().to_uppercase()
     );
     println!(
-        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} sampling={} instant_parquet_row_groups={} reoptimize={} predicate_cache_size={:?} membership={} context={}",
+        "data={} source={} queries={} selected={} threads={} batch_size={} string_type={} excitation_threshold={} warmups={} runs={} sampling={} instant_row_groups={} reoptimize={} predicate_cache_size={:?} membership={} context={}",
         options.data_dir.display(),
         source_name(options),
         options.query_dir.display(),
@@ -1421,7 +1421,7 @@ fn print_help() {
          --runs N                  Timed pairs per query (default: 5)\n\
          --row-locations           Enable experimental cost-based row-location handoffs\n\
          --instant-sampling        Use query-local projected samples instead of the cache\n\
-         --instant-parquet-row-groups N  Row groups per instant Parquet sample (default: 4)\n\
+         --instant-parquet-row-groups N  Stratified candidate row groups (default: 4)\n\
          --fresh-context-per-query Do not reuse Bloom samples across different queries\n\
          --parquet-pushdown        Enable Parquet late-materialized filter pushdown\n\
          --post-scan-membership    Evaluate Bloom membership after Parquet decoding\n\

@@ -190,7 +190,7 @@ The main configuration fields are:
 | `enabled` | `true` | Enable or bypass Bloom planning |
 | `sample_rows` | `10_000` | Target sample rows per immutable source |
 | `sampling_mode` | `Prepared` | Reusable source samples or query-local `Instant` samples |
-| `instant_parquet_row_groups` | `4` | Row-group budget for an Instant Parquet sample |
+| `instant_parquet_row_groups` | `4` | Stratified candidate row groups in an Instant sample |
 | `false_positive_rate` | `0.01` | Target for temporary probabilistic membership |
 | `max_transfer_rounds` | `64` | Fixed-point safety bound |
 | `excitation_threshold` | `1.0` | Cardinality fraction that reactivates a source |

@@ -30,7 +30,10 @@ pub(super) async fn ensure_transfer_handoff(
         let applied_filters = runtime.pending_filters.len();
         let (full_row_width, transfer_row_width) = materialization_widths(
             services.policy,
-            runtime.sample.as_deref(),
+            runtime
+                .sample
+                .as_ref()
+                .map(|sample| sample.partitions.as_slice()),
             table.plan.schema().as_ref(),
             required_columns,
         );
@@ -108,7 +111,7 @@ pub(super) async fn collect_transfer_handoff(
             required_columns,
             input_row_hint,
             services.log_steps,
-            services.row_group_layouts.as_ref(),
+            services.parquet_layouts.as_ref(),
             Arc::clone(&services.context),
         )
         .await?
@@ -122,7 +125,7 @@ pub(super) async fn collect_transfer_handoff(
             filters,
             required_columns,
             services.log_steps,
-            services.row_group_layouts.as_ref(),
+            services.parquet_layouts.as_ref(),
             services.context.as_ref(),
         )? {
             let prepare_elapsed = prepare_started.elapsed();

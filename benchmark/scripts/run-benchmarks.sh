@@ -34,7 +34,10 @@ fi
 
 sampling_args=()
 if [[ "$sampling" == "instant" ]]; then
-    sampling_args+=(--instant-sampling --instant-parquet-row-groups "$instant_row_groups")
+    sampling_args+=(
+        --instant-sampling
+        --instant-parquet-row-groups "$instant_row_groups"
+    )
 fi
 
 if [[ "$#" -eq 0 ]]; then

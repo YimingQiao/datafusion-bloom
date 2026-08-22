@@ -88,6 +88,8 @@ BLOOM_BENCH_WARMUPS=1 BLOOM_BENCH_RUNS=3 \
 No run-script path changes DataFusion's batch size. Set
 `BLOOM_BENCH_THREADS` to change both the Tokio worker count and DataFusion
 target partitions; the README reports complete one- and eight-thread tables.
+Instant runs accept `BLOOM_BENCH_INSTANT_ROW_GROUPS` for sampling sensitivity
+checks.
 
 ## CEB IMDB provenance
 

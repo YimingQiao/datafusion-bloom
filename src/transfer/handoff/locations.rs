@@ -11,7 +11,7 @@ pub(super) async fn collect_two_pass_row_location_handoff(
     required_columns: &[usize],
     input_row_hint: usize,
     log_transfer_steps: bool,
-    row_group_layouts: &RowGroupLayoutCache,
+    parquet_layouts: &ParquetLayoutCache,
     context: Arc<TaskContext>,
 ) -> Result<Option<TransferHandoff>> {
     if required_columns.is_empty() {
@@ -29,7 +29,7 @@ pub(super) async fn collect_two_pass_row_location_handoff(
         );
     }
     let Some(discovery) =
-        try_prepare_location_plan(discovery_projection, log_transfer_steps, row_group_layouts)?
+        try_prepare_location_plan(discovery_projection, log_transfer_steps, parquet_layouts)?
     else {
         return Ok(None);
     };
@@ -218,14 +218,14 @@ pub(super) fn row_location_transfer_plan(
     filters: &[CascadeFilter],
     required_columns: &[usize],
     log_fallback: bool,
-    row_group_layouts: &RowGroupLayoutCache,
+    parquet_layouts: &ParquetLayoutCache,
     context: &TaskContext,
 ) -> Result<Option<RowLocationTransferPlan>> {
     if required_columns.is_empty() {
         return Ok(None);
     }
     let projected = project_table_columns(table, required_columns, context)?;
-    let Some(prepared) = try_prepare_location_plan(projected, log_fallback, row_group_layouts)?
+    let Some(prepared) = try_prepare_location_plan(projected, log_fallback, parquet_layouts)?
     else {
         return Ok(None);
     };

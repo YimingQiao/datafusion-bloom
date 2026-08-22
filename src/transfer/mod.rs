@@ -63,11 +63,12 @@ use self::materialization::{
     MaterializedPartitionBuilder, batch_physical_bytes, compact_materialized_partition,
     observed_handoff_widths, partition_physical_bytes,
 };
+use self::parquet_layout::canonical_files;
 use self::policy::{
     MaterializationFacts, MaterializationStrategy, choose_materialization,
     estimated_projection_width, estimated_schema_width, row_locations_are_concentrated,
 };
-use self::row_locations::{RowLocationLayout, canonical_files, try_prepare_location_plan};
+use self::row_locations::{RowLocationLayout, try_prepare_location_plan};
 use self::sample_cache::PreparedSourceSample;
 use crate::collection::BloomCollection;
 use crate::config::{BloomConfig, HandoffPolicy, ParquetMembershipPlacement, SamplingMode};
@@ -87,15 +88,16 @@ use inspection::*;
 mod materialization;
 mod membership;
 use membership::*;
+mod parquet_layout;
 mod policy;
 mod propagation;
 use propagation::*;
 mod row_locations;
 mod sample_cache;
 mod sampling;
-use sampling::sample_table;
+use sampling::{SampledTable, SamplingOptions, sample_table};
 
-pub(crate) use row_locations::RowGroupLayoutCache;
+pub(crate) use parquet_layout::ParquetLayoutCache;
 pub(crate) use sample_cache::PreparedSampleCache;
 
 const HASH_SEED: u64 = 0x424c_4f4f_4d44_4631;
@@ -104,7 +106,7 @@ const HASH_SEED: u64 = 0x424c_4f4f_4d44_4631;
 pub(crate) struct BloomTransferEngine {
     config: BloomConfig,
     samples: Arc<PreparedSampleCache>,
-    row_group_layouts: Arc<RowGroupLayoutCache>,
+    parquet_layouts: Arc<ParquetLayoutCache>,
 }
 
 #[derive(Debug)]
@@ -245,7 +247,7 @@ struct TableRuntime {
     baseline_rows: f64,
     pending_filters: Vec<CascadeFilter>,
     applied_filter_count: usize,
-    sample: Option<Vec<Vec<RecordBatch>>>,
+    sample: Option<SampledTable>,
     handoff: Option<TransferHandoff>,
 }
 
@@ -259,7 +261,7 @@ struct HandoffServices {
     sampling_mode: SamplingMode,
     instant_parquet_row_groups: usize,
     log_steps: bool,
-    row_group_layouts: Arc<RowGroupLayoutCache>,
+    parquet_layouts: Arc<ParquetLayoutCache>,
     context: Arc<TaskContext>,
 }
 
@@ -298,12 +300,12 @@ impl BloomTransferEngine {
     pub(crate) fn new(
         config: BloomConfig,
         samples: Arc<PreparedSampleCache>,
-        row_group_layouts: Arc<RowGroupLayoutCache>,
+        parquet_layouts: Arc<ParquetLayoutCache>,
     ) -> Self {
         Self {
             config,
             samples,
-            row_group_layouts,
+            parquet_layouts,
         }
     }
 
@@ -338,7 +340,7 @@ impl BloomTransferEngine {
             &graph,
             &self.config,
             Arc::clone(&self.samples),
-            Arc::clone(&self.row_group_layouts),
+            Arc::clone(&self.parquet_layouts),
             Arc::clone(&context),
         )
         .await?;
@@ -357,7 +359,7 @@ impl BloomTransferEngine {
                     runtime
                         .sample
                         .as_ref()
-                        .map_or(0, |sample| count_rows(sample))
+                        .map_or(0, |sample| sample.output_rows)
                 );
             }
         }
@@ -371,7 +373,7 @@ impl BloomTransferEngine {
             sampling_mode: self.config.sampling_mode,
             instant_parquet_row_groups: self.config.instant_parquet_row_groups,
             log_steps: self.config.log_transfer_steps,
-            row_group_layouts: Arc::clone(&self.row_group_layouts),
+            parquet_layouts: Arc::clone(&self.parquet_layouts),
             context: Arc::clone(&context),
         };
 
@@ -644,7 +646,10 @@ impl BloomTransferEngine {
                 let required_columns = required_join_columns(graph, id)?;
                 let (full_row_width, transfer_row_width) = materialization_widths(
                     services.policy,
-                    tables[id].sample.as_deref(),
+                    tables[id]
+                        .sample
+                        .as_ref()
+                        .map(|sample| sample.partitions.as_slice()),
                     graph.tables[id].plan.schema().as_ref(),
                     &required_columns,
                 );
@@ -788,12 +793,12 @@ async fn initialize_tables(
     graph: &BloomGraph,
     config: &BloomConfig,
     samples: Arc<PreparedSampleCache>,
-    row_group_layouts: Arc<RowGroupLayoutCache>,
+    parquet_layouts: Arc<ParquetLayoutCache>,
     context: Arc<TaskContext>,
 ) -> Result<Vec<TableRuntime>> {
     let jobs = graph.tables.iter().map(|table| {
         let samples = Arc::clone(&samples);
-        let row_group_layouts = Arc::clone(&row_group_layouts);
+        let parquet_layouts = Arc::clone(&parquet_layouts);
         let task_context = Arc::clone(&context);
         async move {
             let statistics_estimate = estimated_rows(&table.plan)?;
@@ -805,27 +810,32 @@ async fn initialize_tables(
                 if let Some(sampled) = sample_table(
                     table,
                     config.sample_rows,
-                    config.sampling_mode,
-                    config.instant_parquet_row_groups,
+                    SamplingOptions {
+                        mode: config.sampling_mode,
+                        instant_parquet_row_groups: config.instant_parquet_row_groups,
+                        log_steps: config.log_transfer_steps,
+                    },
                     &samples,
-                    &row_group_layouts,
-                    task_context,
+                    &parquet_layouts,
+                    Arc::clone(&task_context),
                 )
                 .await?
                 {
-                    let estimate = if sampled.input_rows == 0 {
+                    let point_estimate = if sampled.input_rows == 0 && !sampled.is_exact() {
                         statistics_estimate.unwrap_or(base_estimate) as f64
-                    } else if sampled.output_rows == 0 && sampled.input_rows < base_estimate {
+                    } else if sampled.output_rows == 0
+                        && !sampled.is_exact()
+                        && sampled.input_rows < base_estimate
+                    {
                         // A partial sample can miss a rare local survivor. As
                         // in Bloom's estimator, zero then means one sampled-row
                         // of weight rather than a proven empty table.
-                        (base_estimate as f64 / sampled.input_rows as f64).max(1.0)
+                        sampled.one_observation_estimate(base_estimate)
                     } else {
-                        base_estimate as f64 * sampled.output_rows as f64
-                            / sampled.input_rows as f64
+                        sampled.estimate_local_rows(base_estimate as f64)
                     };
-                    sample = Some(sampled.partitions);
-                    estimate
+                    sample = Some(sampled);
+                    point_estimate
                 } else {
                     statistics_estimate.unwrap_or(base_estimate) as f64
                 }

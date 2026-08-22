@@ -549,21 +549,25 @@ pub(super) async fn estimate_destination(
         if let Some(sampled) = sample_table(
             table,
             sample_rows,
-            services.sampling_mode,
-            services.instant_parquet_row_groups,
+            SamplingOptions {
+                mode: services.sampling_mode,
+                instant_parquet_row_groups: services.instant_parquet_row_groups,
+                log_steps: services.log_steps,
+            },
             samples,
-            &services.row_group_layouts,
+            &services.parquet_layouts,
             Arc::clone(&services.context),
         )
         .await?
         {
-            runtime.sample = Some(sampled.partitions);
+            runtime.sample = Some(sampled);
         } else if table.repeatable {
             let partitions = table.plan.output_partitioning().partition_count().max(1);
             let per_partition = sample_rows.div_ceil(partitions).max(1);
             let limited = Arc::new(LocalLimitExec::new(Arc::clone(&table.plan), per_partition));
-            runtime.sample =
-                Some(collect_partitioned(limited, Arc::clone(&services.context)).await?);
+            runtime.sample = Some(SampledTable::from_output_partitions(
+                collect_partitioned(limited, Arc::clone(&services.context)).await?,
+            ));
         } else {
             // An unusual bounded source without a clonable fetch path cannot
             // be sampled safely. Execute it once and retain the exact result.
@@ -578,17 +582,17 @@ pub(super) async fn estimate_destination(
     let sample = runtime.sample.as_ref().ok_or_else(|| {
         DataFusionError::Internal("Bloom destination sample was not initialized".to_string())
     })?;
-    let sampled_rows = count_rows(sample);
-    if sampled_rows == 0 {
+    if sample.output_rows == 0 {
         return Ok(runtime.initial_estimate);
     }
-    let survivors = count_survivors(sample, &runtime.pending_filters, random_state)?;
-    if survivors == 0 && sampled_rows as f64 + f64::EPSILON < runtime.initial_estimate {
-        // A zero in a bounded sample is evidence for a very small destination,
-        // not proof that the full destination is empty. Give it one sample-row
-        // of weight so scheduling does not mistake sampling uncertainty for an
-        // exact cardinality.
-        return Ok((runtime.initial_estimate / sampled_rows as f64).max(1.0));
+    let survivors = count_survivors(&sample.partitions, &runtime.pending_filters, random_state)?;
+    if survivors == 0
+        && !sample.is_exact()
+        && sample.output_rows as f64 + f64::EPSILON < runtime.initial_estimate
+    {
+        // Acquisition is complete before propagation. A transfer zero means
+        // "smaller than one observed row", not a reason to perform more I/O.
+        return Ok((runtime.initial_estimate / sample.output_rows as f64).max(1.0));
     }
-    Ok(runtime.initial_estimate * survivors as f64 / sampled_rows as f64)
+    Ok(sample.estimate_transfer_survivors(survivors, runtime.initial_estimate))
 }

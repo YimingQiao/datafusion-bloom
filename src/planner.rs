@@ -10,14 +10,14 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 
 use crate::compat::{is_recoverable_transfer_error, is_resource_exhausted};
 use crate::config::BloomConfig;
-use crate::transfer::{BloomTransferEngine, PreparedSampleCache, RowGroupLayoutCache};
+use crate::transfer::{BloomTransferEngine, ParquetLayoutCache, PreparedSampleCache};
 
 /// DataFusion query planner that inserts Bloom's transfer phase between P0 and P1.
 #[derive(Debug, Clone)]
 pub struct BloomQueryPlanner {
     config: BloomConfig,
     samples: Arc<PreparedSampleCache>,
-    row_group_layouts: Arc<RowGroupLayoutCache>,
+    parquet_layouts: Arc<ParquetLayoutCache>,
 }
 
 impl BloomQueryPlanner {
@@ -28,7 +28,7 @@ impl BloomQueryPlanner {
         Ok(Self {
             config,
             samples: Arc::new(PreparedSampleCache::default()),
-            row_group_layouts: Arc::new(RowGroupLayoutCache::default()),
+            parquet_layouts: Arc::new(ParquetLayoutCache::default()),
         })
     }
 
@@ -93,7 +93,7 @@ impl QueryPlanner for BloomQueryPlanner {
         let transfer = BloomTransferEngine::new(
             self.config.clone(),
             Arc::clone(&self.samples),
-            Arc::clone(&self.row_group_layouts),
+            Arc::clone(&self.parquet_layouts),
         );
         let rewritten = match transfer
             .rewrite(p0, Arc::clone(&formal_plan), session_state.task_ctx())

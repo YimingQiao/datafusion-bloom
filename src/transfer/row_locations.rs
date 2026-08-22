@@ -5,11 +5,8 @@
 //! offsets can be reconstructed exactly; every unsupported shape falls back to
 //! the default FullRows ownership boundary.
 
-use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::fs::File;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, UInt32Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -21,7 +18,7 @@ use datafusion::datasource::physical_plan::{
 };
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
-use datafusion::parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection};
+use datafusion::parquet::arrow::arrow_reader::RowSelection;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, PlanProperties};
@@ -33,6 +30,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_datasource::PartitionedFile;
 
+use super::parquet_layout::{ParquetLayoutCache, canonical_files};
 use super::policy::RowLocationLocality;
 use futures::StreamExt;
 
@@ -56,65 +54,13 @@ pub(crate) struct PreparedLocationPlan {
     pub(crate) layout: RowLocationLayout,
 }
 
-/// Planner-owned cache for immutable Parquet row-group lengths. Stable row
-/// locations need this metadata for every query, but reading all file footers
-/// again is pure setup overhead.
-#[derive(Debug, Default)]
-pub(crate) struct RowGroupLayoutCache {
-    entries: Mutex<HashMap<String, Arc<Vec<usize>>>>,
-}
-
-impl RowGroupLayoutCache {
-    /// Cache immutable row-group lengths under source snapshot identity. They
-    /// translate global offsets into reader selections but carry no query
-    /// predicate state.
-    pub(crate) fn row_group_rows(&self, file: &PartitionedFile) -> Result<Arc<Vec<usize>>> {
-        let key = format!(
-            "{}|{}|{:?}|{:?}|{:?}",
-            file.object_meta.location,
-            file.object_meta.size,
-            file.object_meta.last_modified,
-            file.object_meta.e_tag,
-            file.object_meta.version
-        );
-        if let Some(rows) = self
-            .entries
-            .lock()
-            .map_err(|_| {
-                DataFusionError::Internal(
-                    "Bloom row-group layout cache lock was poisoned".to_string(),
-                )
-            })?
-            .get(&key)
-            .cloned()
-        {
-            return Ok(rows);
-        }
-
-        let path = local_path(file);
-        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-        let rows = Arc::new(
-            reader
-                .metadata()
-                .row_groups()
-                .iter()
-                .map(|row_group| row_group.num_rows() as usize)
-                .collect(),
-        );
-        let mut entries = self.entries.lock().map_err(|_| {
-            DataFusionError::Internal("Bloom row-group layout cache lock was poisoned".to_string())
-        })?;
-        Ok(Arc::clone(entries.entry(key).or_insert(rows)))
-    }
-}
-
 /// Attach stable `(file_id, row_offset)` columns below all local table
 /// operators. This fast path is deliberately conservative: unsupported source
 /// shapes fall back to ordinary Bloom collections.
 pub(crate) fn try_prepare_location_plan(
     plan: Arc<dyn ExecutionPlan>,
     log_fallback: bool,
-    layouts: &RowGroupLayoutCache,
+    layouts: &ParquetLayoutCache,
 ) -> Result<Option<PreparedLocationPlan>> {
     let mut paths = vec![];
     collect_source_paths(&plan, &mut vec![], &mut paths);
@@ -331,70 +277,6 @@ fn consecutive_run_count(offsets: &[usize]) -> usize {
         .enumerate()
         .filter(|(index, offset)| *index == 0 || offsets[*index - 1] + 1 != **offset)
         .count()
-}
-
-/// Reconstruct one canonical whole-file entry from DataFusion's possibly split
-/// scan groups. Any gap or unknown extension makes physical offsets unsafe and
-/// disables the optimization.
-pub(crate) fn canonical_files(config: &FileScanConfig) -> Result<Vec<PartitionedFile>> {
-    let mut by_path: BTreeMap<String, Vec<PartitionedFile>> = BTreeMap::new();
-    for file in config.file_groups.iter().flat_map(FileGroup::iter) {
-        // Predicate/page pruning attaches a ParquetAccessPlan to each file.
-        // Row-location assignment deliberately recreates an unfiltered full
-        // scan, so this particular extension must be discarded. Preserve the
-        // conservative fallback for any unrelated user-defined extension.
-        let has_only_access_plan =
-            file.extensions.len() == 1 && file.extensions.get::<ParquetAccessPlan>().is_some();
-        if !file.extensions.is_empty() && !has_only_access_plan {
-            return Ok(vec![]);
-        }
-        by_path
-            .entry(file.object_meta.location.to_string())
-            .or_default()
-            .push(file.clone());
-    }
-
-    let mut output = Vec::with_capacity(by_path.len());
-    for parts in by_path.into_values() {
-        let mut file = parts[0].clone();
-        let size = file.object_meta.size;
-        let covers_full_file =
-            parts.iter().any(|part| part.range.is_none()) || ranges_cover_file(&parts, size);
-        if !covers_full_file {
-            return Ok(vec![]);
-        }
-        file.range = None;
-        file.extensions = Default::default();
-        output.push(file);
-    }
-    Ok(output)
-}
-
-fn ranges_cover_file(parts: &[PartitionedFile], size: u64) -> bool {
-    let mut ranges = parts
-        .iter()
-        .filter_map(|part| part.range.as_ref())
-        .map(|range| (range.start.max(0) as u64, range.end.max(0) as u64))
-        .collect::<Vec<_>>();
-    ranges.sort_unstable();
-    let mut covered = 0_u64;
-    for (start, end) in ranges {
-        if start > covered {
-            return false;
-        }
-        covered = covered.max(end);
-    }
-    covered >= size
-}
-
-pub(crate) fn local_path(file: &PartitionedFile) -> PathBuf {
-    let raw = file.object_meta.location.as_ref();
-    let path = PathBuf::from(raw);
-    if path.is_absolute() {
-        path
-    } else {
-        PathBuf::from("/").join(path)
-    }
 }
 
 /// Extract, sort, and deduplicate the synthetic physical identities retained
