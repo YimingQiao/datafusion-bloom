@@ -806,8 +806,11 @@ impl PlanFeatures {
     }
 
     fn visit(&mut self, plan: &dyn datafusion::physical_plan::ExecutionPlan) -> Result<()> {
-        let rows = plan
-            .partition_statistics(None)?
+        let rows = datafusion::physical_plan::statistics::StatisticsContext::new()
+            .compute(
+                plan,
+                &datafusion::physical_plan::statistics::StatisticsArgs::new(),
+            )?
             .num_rows
             .get_value()
             .copied()
@@ -859,8 +862,8 @@ fn benchmark_session_config(options: &Options) -> SessionConfig {
     // Arrow's byte-view take path can retain and repeatedly clone a growing
     // backing-buffer graph across high-fanout joins. Until that upstream path
     // is fixed, the release benchmark uses ordinary Utf8 for both stock
-    // DataFusion and Bloom. `--utf8view` restores DataFusion 54.1's native
-    // default for an explicit sensitivity comparison.
+    // DataFusion and Bloom. `--utf8view` restores DataFusion's native default
+    // for an explicit sensitivity comparison.
     config.options_mut().sql_parser.map_string_types_to_utf8view = options.utf8view;
     config
         .options_mut()
@@ -1414,7 +1417,7 @@ fn print_help() {
          --scale-factor N          TPC-H scale factor used in the default path\n\
          --threads N               DataFusion target partitions (default: 1)\n\
          --batch-size N            Override DataFusion's native Arrow batch size\n\
-         --utf8view                Restore DataFusion 54.1's native Utf8View strings\n\
+         --utf8view                Restore DataFusion's native Utf8View strings\n\
          --large-utf8              Require 64-bit-offset strings from Parquet\n\
          --excitation-threshold F  Reactivate below this cardinality fraction (default: 1)\n\
          --warmups N               Untimed pairs per query (default: 1)\n\

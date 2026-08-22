@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::common::Result;
 use datafusion::execution::context::QueryPlanner;
 use datafusion::execution::{SessionState, SessionStateBuilder};
@@ -54,22 +55,28 @@ impl QueryPlanner for BloomQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session: &dyn Session,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let default_planner = DefaultPhysicalPlanner::default();
 
         if !self.config.enabled {
             return default_planner
-                .create_physical_plan(logical_plan, session_state)
+                .create_physical_plan(logical_plan, session)
                 .await;
         }
+
+        let Some(session_state) = session.as_any().downcast_ref::<SessionState>() else {
+            return datafusion::common::not_impl_err!(
+                "BloomQueryPlanner requires DataFusion SessionState"
+            );
+        };
 
         // Keep DataFusion's native physical plan as the formal join plan. Bloom
         // only replaces table-operator leaves that produce a transfer handoff;
         // every untouched leaf therefore retains DataFusion's runtime dynamic
         // filters and the join stage remains otherwise unchanged.
         let formal_plan = default_planner
-            .create_physical_plan(logical_plan, session_state)
+            .create_physical_plan(logical_plan, session)
             .await?;
 
         // A table-operator child must be independently executable during

@@ -1,6 +1,7 @@
 //! Physical transfer predicate and the optional post-scan pushdown boundary.
 
 use super::*;
+use datafusion::physical_plan::statistics::{ChildStats, StatisticsArgs};
 
 /// Executable membership predicate used by transfer scans and direct formal
 /// handoffs. Formal Parquet scans keep this expression in Arrow so decoder
@@ -111,6 +112,13 @@ impl DisplayAs for BloomScanBoundaryExec {
 }
 
 impl ExecutionPlan for BloomScanBoundaryExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn name(&self) -> &str {
         "BloomScanBoundaryExec"
     }
@@ -148,8 +156,22 @@ impl ExecutionPlan for BloomScanBoundaryExec {
         self.input.execute(partition, context)
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
-        self.input.partition_statistics(partition)
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
+        let [input_stats] = input_stats else {
+            return internal_err!(
+                "Bloom scan boundary expected one child statistic, got {}",
+                input_stats.len()
+            );
+        };
+        Ok(Arc::clone(input_stats))
+    }
+
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(partition)]
     }
 
     fn supports_limit_pushdown(&self) -> bool {

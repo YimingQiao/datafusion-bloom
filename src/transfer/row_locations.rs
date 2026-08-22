@@ -11,6 +11,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, UInt32Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result, internal_err, plan_err};
 use datafusion::datasource::physical_plan::parquet::ParquetAccessPlan;
 use datafusion::datasource::physical_plan::{
@@ -20,13 +21,14 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::parquet::arrow::arrow_reader::RowSelection;
 use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, PlanProperties};
 use datafusion::physical_plan::filter::{FilterExec, FilterExecBuilder};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties,
+    SendableRecordBatchStream, replace_children_if_necessary,
 };
 use datafusion_datasource::PartitionedFile;
 
@@ -458,7 +460,7 @@ fn append_locations_at_path(
             plan.name()
         );
     }
-    plan.with_new_children(vec![child])
+    replace_children_if_necessary(plan, vec![child])
 }
 
 fn replace_at_path(
@@ -475,7 +477,7 @@ fn replace_at_path(
         return internal_err!("invalid Bloom replacement path {path:?}");
     }
     children[index] = replace_at_path(Arc::clone(&children[index]), &path[1..], replacement)?;
-    plan.with_new_children(children)
+    replace_children_if_necessary(plan, children)
 }
 
 /// Assign original offsets while reading a canonical, unfiltered whole-file
@@ -571,6 +573,13 @@ impl DisplayAs for RowLocationExec {
 }
 
 impl ExecutionPlan for RowLocationExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn name(&self) -> &'static str {
         "BloomRowLocationExec"
     }
@@ -636,6 +645,13 @@ impl DisplayAs for KnownRowLocationExec {
 }
 
 impl ExecutionPlan for KnownRowLocationExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn name(&self) -> &'static str {
         "BloomKnownRowLocationExec"
     }

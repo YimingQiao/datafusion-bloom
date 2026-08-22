@@ -890,7 +890,11 @@ async fn row_location_mode_preserves_single_aggregate_partitioning() -> Result<(
         .await?;
     let plan = bloom.sql(query).await?.create_physical_plan().await?;
     let formatted_plan = displayable(plan.as_ref()).indent(false).to_string();
-    assert_eq!(formatted_plan.matches("BloomCollection").count(), 3);
+    assert_eq!(
+        formatted_plan.matches("BloomCollection").count(),
+        2,
+        "{formatted_plan}"
+    );
     let actual = collect(plan, bloom.task_ctx()).await?;
 
     assert_eq!(

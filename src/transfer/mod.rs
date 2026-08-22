@@ -22,6 +22,7 @@ use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::hash_utils::{RandomState, create_hashes};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result, ScalarValue, Statistics, internal_err};
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::physical_plan::parquet::ParquetAccessPlan;
@@ -54,7 +55,7 @@ use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::scalar_subquery::ScalarSubqueryExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
-    SendableRecordBatchStream, with_new_children_if_necessary,
+    SendableRecordBatchStream, replace_children_if_necessary,
 };
 use futures::TryStreamExt;
 use futures::future::try_join_all;

@@ -4,12 +4,13 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::Result;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::{DataSource, DataSourceExec};
 use datafusion::execution::TaskContext;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_expr::projection::ProjectionExprs;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::SchedulingType;
 use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, SendableRecordBatchStream, Statistics,
@@ -164,6 +165,13 @@ impl fmt::Debug for BloomCollectionSource {
 }
 
 impl DataSource for BloomCollectionSource {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
     fn open(
         &self,
         partition: usize,

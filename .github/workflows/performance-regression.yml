@@ -173,6 +173,7 @@ jobs:
             --workload tpch_sf1 \
             --sampling-mode prepared \
             --sampling-mode instant \
+            --predicate-cache-size 0 \
             --out-dir "${RESULT_DIR}"
 
       - name: Upload benchmark logs

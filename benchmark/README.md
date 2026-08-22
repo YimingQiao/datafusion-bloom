@@ -26,13 +26,13 @@ sets both DataFusion `target_partitions` and the exact Tokio worker count; one
 thread uses a current-thread runtime. Bloom preserves P0 scan file groups, so a
 handoff cannot acquire hidden scan parallelism.
 
-The runner does not override DataFusion's Arrow batch size by default
-(DataFusion 54.1.0 uses 8,192). `--batch-size` exists only for sensitivity
+The runner does not override DataFusion's 8,192-row Arrow batch size by default.
+`--batch-size` exists only for sensitivity
 analysis. Baseline and Bloom use the same Parquet tables and retain
 DataFusion's native join dynamic-filter pushdown.
 
 The runner temporarily maps strings to owned Arrow offset arrays for both
-engines because DataFusion 54.1's native `Utf8View` `take` path can retain an
+engines because DataFusion's native `Utf8View` `take` path can retain an
 amplified backing-buffer graph across high-fanout joins. Ordinary `Utf8` is the
 default. Full CEB IMDB uses `LargeUtf8`, described below, because some stock
 DataFusion intermediates exceed the 32-bit offset limit. The result header
@@ -89,7 +89,10 @@ No run-script path changes DataFusion's batch size. Set
 `BLOOM_BENCH_THREADS` to change both the Tokio worker count and DataFusion
 target partitions; the README reports complete one- and eight-thread tables.
 Instant runs accept `BLOOM_BENCH_INSTANT_ROW_GROUPS` for sampling sensitivity
-checks.
+checks. `BLOOM_BENCH_PREDICATE_CACHE_SIZE` defaults to zero for both engines to
+avoid the Arrow 59.2
+[sparse-page predicate-cache regression](https://github.com/apache/arrow-rs/issues/10733);
+remove this common workaround after the upstream fix is released.
 
 ## CEB IMDB provenance
 
@@ -129,7 +132,8 @@ Prepare and run JOB from the repository root:
 ```bash
 benchmark/scripts/prepare-job.sh
 cargo bench --bench workload -- \
-  --workload job --threads 1 --warmups 1 --runs 3 --parquet-pushdown
+  --workload job --threads 1 --warmups 1 --runs 3 --parquet-pushdown \
+  --predicate-cache-size 0
 ```
 
 Use `--queries 1a,6a,13a` for a smoke subset. Add `--show-plan` to print the
@@ -146,7 +150,8 @@ BLOOM_JOB_COMPRESSION=uncompressed \
 cargo bench --bench workload -- \
   --workload job \
   --data-dir benchmark_data/job/parquet-uncompressed \
-  --threads 1 --warmups 1 --runs 3 --parquet-pushdown --bloom-only
+  --threads 1 --warmups 1 --runs 3 --parquet-pushdown \
+  --predicate-cache-size 0 --bloom-only
 ```
 
 To compare against the Bloom README protocol without also paying for the
@@ -156,7 +161,7 @@ complete query elapsed time and fingerprints the complete output:
 ```bash
 cargo bench --bench workload -- \
   --workload job --threads 1 --warmups 1 --runs 3 \
-  --parquet-pushdown --bloom-only
+  --parquet-pushdown --predicate-cache-size 0 --bloom-only
 ```
 
 The default benchmark uses `FullRows`. The experimental cost-based
@@ -181,7 +186,7 @@ and kept in this repository. For example:
 benchmark/scripts/prepare-tpch.sh 10
 cargo bench --bench workload -- \
   --workload tpch --scale-factor 10 --threads 1 --warmups 1 --runs 3 \
-  --parquet-pushdown
+  --parquet-pushdown --predicate-cache-size 0
 ```
 
 ## STATS-CEB provenance
@@ -197,7 +202,7 @@ with the repository's Rust preparation program:
 benchmark/scripts/prepare-stats-ceb.sh
 cargo bench --bench workload -- \
   --workload stats-ceb --threads 1 --warmups 1 --runs 3 \
-  --parquet-pushdown
+  --parquet-pushdown --predicate-cache-size 0
 ```
 
 ## Diagnostics

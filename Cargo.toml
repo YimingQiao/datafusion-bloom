@@ -1,8 +1,8 @@
 [package]
 name = "datafusion-bloom"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 description = "Bloom transfer extension for Apache DataFusion"
 license = "MIT"
 readme = "README.md"
@@ -12,8 +12,8 @@ categories = ["database"]
 
 [dependencies]
 async-trait = "0.1"
-datafusion = { version = "54.1.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
-datafusion-datasource = "54.1.0"
+datafusion = { version = "55.0.0", default-features = false, features = ["sql", "parquet", "unicode_expressions"] }
+datafusion-datasource = "55.0.0"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "sync"] }
 

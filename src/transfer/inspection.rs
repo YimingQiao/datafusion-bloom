@@ -3,11 +3,16 @@
 use super::*;
 
 pub(super) fn estimated_rows(plan: &Arc<dyn ExecutionPlan>) -> Result<Option<usize>> {
-    Ok(plan
-        .partition_statistics(None)?
-        .num_rows
-        .get_value()
-        .copied())
+    Ok(
+        datafusion::physical_plan::statistics::StatisticsContext::new()
+            .compute(
+                plan.as_ref(),
+                &datafusion::physical_plan::statistics::StatisticsArgs::new(),
+            )?
+            .num_rows
+            .get_value()
+            .copied(),
+    )
 }
 
 /// Recover the population entering a table-operator subtree rather than its
@@ -79,5 +84,5 @@ pub(super) fn replace_at_path(
         return internal_err!("Bloom plan path contains invalid child index {index}");
     }
     children[index] = replace_at_path(Arc::clone(&children[index]), rest, replacement)?;
-    plan.with_new_children(children)
+    replace_children_if_necessary(plan, children)
 }

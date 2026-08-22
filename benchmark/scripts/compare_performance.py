@@ -75,6 +75,12 @@ def parse_args():
     parser.add_argument("--warmups", type=nonnegative_integer, default=0)
     parser.add_argument("--runs", type=positive_integer, default=1)
     parser.add_argument(
+        "--predicate-cache-size",
+        type=nonnegative_integer,
+        default=0,
+        help="Parquet predicate cache bytes passed equally to every runner (default: 0)",
+    )
+    parser.add_argument(
         "--rounds",
         type=positive_integer,
         default=3,
@@ -153,6 +159,8 @@ def runner_command(args, workload, runner, side, sampling_mode):
         "--runs",
         str(args.runs),
         "--parquet-pushdown",
+        "--predicate-cache-size",
+        str(args.predicate_cache_size),
         *extra,
     ]
     if sampling_mode == "instant" and side != "datafusion":

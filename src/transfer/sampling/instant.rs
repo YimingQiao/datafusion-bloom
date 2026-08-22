@@ -9,7 +9,7 @@ use super::SampledTable;
 use datafusion::datasource::physical_plan::parquet::{
     ParquetFileMetrics, RowGroupAccessPlanFilter,
 };
-use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 
 /// Acquire one dense sample from row groups that survive metadata pruning.
@@ -203,7 +203,9 @@ fn candidate_row_groups(
     if !parquet_source.table_parquet_options().global.pruning {
         return Ok(vec![true; row_group_count]);
     }
-    let Ok(predicate) = PruningPredicate::try_new(predicate, Arc::clone(layout.arrow_schema()))
+    let Ok(predicate) = PruningPredicateBuilder::new()
+        .with_file_schema(Arc::clone(layout.arrow_schema()))
+        .try_build(predicate)
     else {
         return Ok(vec![true; row_group_count]);
     };

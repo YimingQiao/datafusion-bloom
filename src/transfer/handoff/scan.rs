@@ -59,7 +59,7 @@ pub(in crate::transfer) fn strip_verified_local_filters(
         .into_iter()
         .map(|child| strip_verified_local_filters(Arc::clone(child)))
         .collect::<Result<Vec<_>>>()?;
-    plan.with_new_children(rewritten)
+    replace_children_if_necessary(plan, rewritten)
 }
 
 pub(super) fn strip_parquet_source_predicates(
@@ -95,7 +95,7 @@ pub(super) fn strip_parquet_source_predicates(
         .into_iter()
         .map(|child| strip_parquet_source_predicates(Arc::clone(child)))
         .collect::<Result<Vec<_>>>()?;
-    plan.with_new_children(rewritten)
+    replace_children_if_necessary(plan, rewritten)
 }
 
 /// Keep independently built transfer predicates as sequential stages so cheap
@@ -348,7 +348,7 @@ fn prioritize_parquet_membership(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn
         .into_iter()
         .map(|child| prioritize_parquet_membership(Arc::clone(child)))
         .collect::<Result<Vec<_>>>()?;
-    plan.with_new_children(children)
+    replace_children_if_necessary(plan, children)
 }
 
 fn contains_cascade_predicate(predicate: &Arc<dyn PhysicalExpr>) -> bool {
@@ -561,7 +561,7 @@ fn push_incremental_filters(
         );
     }
 
-    let updated_node = with_new_children_if_necessary(Arc::clone(node), new_children)?;
+    let updated_node = replace_children_if_necessary(Arc::clone(node), new_children)?;
     let mut result = updated_node.handle_child_pushdown_result(
         FilterPushdownPhase::Pre,
         ChildPushdownResult {

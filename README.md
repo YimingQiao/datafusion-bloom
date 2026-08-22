@@ -1,7 +1,7 @@
 # Bloom for Apache DataFusion
 
-[![Version: 0.1.1](https://img.shields.io/badge/version-0.1.1-blue)](Cargo.toml)
-[![DataFusion: 54.1.0](https://img.shields.io/badge/DataFusion-54.1.0-orange)](Cargo.toml)
+[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue)](Cargo.toml)
+[![DataFusion: 55.0.0](https://img.shields.io/badge/DataFusion-55.0.0-orange)](Cargo.toml)
 [![CI](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml/badge.svg)](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -99,11 +99,17 @@ commands and the guarded-cast normalization required by CEB.
 
 ## Compatibility
 
-This preview supports the Cargo SemVer-compatible Apache DataFusion `54.x`
-line starting at `54.1.0`, and Rust `1.88` or newer. CI tests both the committed
-lockfile and a fresh latest-compatible dependency resolution. DataFusion major
-versions may change physical-planner interfaces and receive a separately tested
-Bloom release rather than being accepted silently.
+Bloom releases follow DataFusion's major-version boundary:
+
+| DataFusion Bloom | DataFusion | Minimum Rust |
+|---|---|---|
+| `0.2.x` | `55.x` | `1.94` |
+| `0.1.x` | `54.x` starting at `54.1.0` | `1.88` |
+
+CI tests both the committed lockfile and a fresh latest-compatible dependency
+resolution. DataFusion major versions may change physical-planner interfaces
+and receive a separately tested Bloom release rather than being accepted
+silently.
 
 Bloom currently supports bounded inner equi-join graphs whose join keys can be
 traced to table columns, including nullable and composite keys. Unsupported

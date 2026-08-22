@@ -40,14 +40,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Resolve latest compatible dependencies
         run: cargo update
-      - name: Check latest DataFusion 54.x resolution
+      - name: Check latest DataFusion 55.x resolution
         run: cargo check --all-targets
 
   minimum-rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: Swatinem/rust-cache@v2
       - name: Check declared MSRV
         run: cargo check --all-targets

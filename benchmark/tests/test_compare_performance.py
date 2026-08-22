@@ -60,6 +60,7 @@ class RunnerCommandTest(unittest.TestCase):
             warmups=0,
             runs=1,
             instant_parquet_row_groups=4,
+            predicate_cache_size=0,
         )
 
     def test_enables_instant_sampling_for_bloom(self):
@@ -69,6 +70,9 @@ class RunnerCommandTest(unittest.TestCase):
         self.assertIn("--instant-sampling", command)
         self.assertIn("--instant-parquet-row-groups", command)
         self.assertIn("--bloom-only", command)
+        self.assertEqual(
+            command[command.index("--predicate-cache-size") + 1], "0"
+        )
 
     def test_keeps_datafusion_independent_of_sampling_mode(self):
         command = runner_command(
