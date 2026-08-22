@@ -1,6 +1,6 @@
 # Bloom for Apache DataFusion
 
-[![Version: 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)](Cargo.toml)
+[![Version: 0.1.1](https://img.shields.io/badge/version-0.1.1-blue)](Cargo.toml)
 [![DataFusion: 54.1.0](https://img.shields.io/badge/DataFusion-54.1.0-orange)](Cargo.toml)
 [![CI](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml/badge.svg)](https://github.com/YimingQiao/datafusion-bloom/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
