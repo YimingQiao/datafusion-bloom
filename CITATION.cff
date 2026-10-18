@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "For RPT+ research ideas, cite the preferred paper. For results or implementation specific to this Bloom extension, also cite this repository."
+type: software
+title: "Bloom for Apache DataFusion"
+url: "https://github.com/YimingQiao/datafusion-bloom"
+authors:
+  - family-names: "Qiao"
+    given-names: "Yiming"
+preferred-citation:
+  type: article
+  title: "Robust Predicate Transfer with Dynamic Execution"
+  journal: "Proceedings of the VLDB Endowment"
+  volume: 19
+  issue: 6
+  year: 2026
+  doi: "10.14778/3797919.3797934"
+  start: 1278
+  end: 1290
+  authors:
+    - family-names: "Qiao"
+      given-names: "Yiming"
+    - family-names: "Boncz"
+      given-names: "Peter"
+    - family-names: "Zhang"
+      given-names: "Huanchen"
